@@ -1,0 +1,16 @@
+# `roc docs` output
+/generated-docs/
+
+# `roc bundle` output, its scratch directory, and release-package's work area
+/dist/
+/.roc_bundle_tmp/
+/.release/
+
+# Corpus generator scratch
+__pycache__/
+s2loop_test.cc
+s2polygon_test.cc
+
+# Example binaries
+/examples/covering
+/examples/covering.exe

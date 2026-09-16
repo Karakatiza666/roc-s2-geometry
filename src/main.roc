@@ -1,0 +1,26 @@
+package
+	[
+		R1Interval,
+		R2Point,
+		R2Rect,
+		S1Angle,
+		S1ChordAngle,
+		S1Interval,
+		S2Cap,
+		S2Cell,
+		S2CellId,
+		S2CellUnion,
+		S2Coords,
+		S2Earth,
+		S2Edge,
+		S2LatLng,
+		S2LatLngRect,
+		S2Loop,
+		S2Metric,
+		S2Point,
+		S2Polygon,
+		S2Polyline,
+		S2Predicates,
+		S2RegionCoverer,
+	]
+	{}
