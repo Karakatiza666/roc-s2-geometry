@@ -21,6 +21,7 @@ jobs:
   build-bundle:
     name: Validate and prepare release
     runs-on: ubuntu-26.04
+    timeout-minutes: 15
     permissions:
       contents: read
     outputs:
@@ -111,6 +112,7 @@ jobs:
     name: Test package bundle (${{ matrix.os }})
     needs: build-bundle
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:
@@ -138,6 +140,7 @@ jobs:
     needs: [build-bundle, test-bundle]
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     permissions:
       contents: write
     defaults:
@@ -199,6 +202,7 @@ jobs:
     needs: [build-bundle, create-release]
     if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:
@@ -220,6 +224,7 @@ jobs:
     needs: [build-bundle, test-published]
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     permissions:
       contents: write
       pull-requests: write

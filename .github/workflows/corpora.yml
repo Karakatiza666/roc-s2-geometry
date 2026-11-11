@@ -1,0 +1,62 @@
+name: Corpora
+
+# Regenerates the golden corpora in tests/ from their sources and fails when
+# the result differs from the committed files. The Tests workflow checks the
+# port against the corpora; this one checks that the corpora still come from
+# s2sphere and from upstream's test files, and not from an edit by hand.
+#
+# CoverCorpus is not regenerated here. Its oracle needs s2geometry and abseil
+# built against libc++, which takes longer than the rest of CI together.
+on:
+  push:
+    paths:
+      - "tools/**"
+      - "tests/*Corpus.roc"
+      - ".github/workflows/corpora.yml"
+  pull_request:
+    paths:
+      - "tools/**"
+      - "tests/*Corpus.roc"
+      - ".github/workflows/corpora.yml"
+  workflow_dispatch:
+
+# Do not add permissions here. Configure them at the job level.
+permissions: {}
+
+concurrency:
+  group: corpora-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regenerate:
+    name: Regenerate the corpora
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      # The s2sphere revision in UPSTREAM. Its master has not changed since.
+      S2SPHERE: d1d067e8c06e5fbaf0cc0158bade947b4a03a438
+      S2GEOMETRY: v0.11.1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: ./.github/actions/setup-roc
+      - name: Install s2sphere
+        run: pip install "git+https://github.com/sidewalklabs/s2sphere@${S2SPHERE}"
+      - name: Regenerate the s2sphere corpora
+        run: python3 tools/generate_corpus.py
+      - name: Regenerate the corpora from upstream's test files
+        run: |
+          set -euo pipefail
+          for f in s2loop_test.cc s2polygon_test.cc; do
+            curl -sSfL -o "$RUNNER_TEMP/$f" \
+              "https://raw.githubusercontent.com/google/s2geometry/${S2GEOMETRY}/src/s2/$f"
+          done
+          python3 tools/generate_loop_corpus.py "$RUNNER_TEMP/s2loop_test.cc"
+          python3 tools/generate_polygon_corpus.py "$RUNNER_TEMP/s2polygon_test.cc"
+      - run: roc fmt tests
+      - name: Compare with the committed corpora
+        run: git diff --exit-code --stat -- tests/

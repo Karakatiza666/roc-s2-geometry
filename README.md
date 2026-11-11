@@ -190,7 +190,11 @@ The first script checks the format, type-checks both entry points, runs the
 tests and the examples, and generates the docs. The second line bundles the
 package and runs the examples against that bundle, served on localhost.
 GitHub Actions runs both on Linux x64 and arm64, macOS on Apple silicon and
-Intel, and Windows, against the pinned nightly.
+Intel, and Windows, against the pinned nightly. When a change touches `tools/`
+or a corpus, the `Corpora` workflow also regenerates the corpora from s2sphere
+and from upstream's test files, and fails if they differ from the committed
+ones. It does not regenerate `CoverCorpus`, because its oracle needs a C++
+build of upstream.
 
 There are 766 assertions. `roc test src/main.roc` runs the 655 unit tests
 written alongside the modules they cover. `roc test tests/main.roc` runs the

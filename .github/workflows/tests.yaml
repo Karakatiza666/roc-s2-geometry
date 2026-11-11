@@ -24,6 +24,7 @@ jobs:
   bundle:
     name: Bundle the package
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -43,6 +44,7 @@ jobs:
     name: Test (${{ matrix.os }})
     needs: bundle
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:

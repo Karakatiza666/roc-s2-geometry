@@ -29,6 +29,7 @@ jobs:
     if: github.event_name != 'release' || !github.event.release.prerelease
     name: Deploy archived release documentation
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     permissions:
       contents: read
       pages: write
