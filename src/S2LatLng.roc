@@ -1,6 +1,7 @@
 import S1Angle
 import Internal/S2Math
 import S2Point
+import Internal/S2Coder
 
 ## A point on the sphere in latitude-longitude coordinates, both in radians.
 ##
@@ -191,6 +192,21 @@ S2LatLng := { lat : F64, lng : F64 }.{
 
 	to_inspect : S2LatLng -> Str
 	to_inspect = |ll| "S2LatLng(${ll.lat_degrees().to_str()}, ${ll.lng_degrees().to_str()})"
+
+	## The 16 bytes that upstream's `S2LatLng::Encode` writes: the latitude and
+	## the longitude in radians, each as a little-endian IEEE 754 double. There
+	## is no version byte.
+	encode : S2LatLng -> List(U8)
+	encode = |ll| [] |> S2Coder.put_f64(ll.lat) |> S2Coder.put_f64(ll.lng)
+
+	## The position that `encode` writes. Bytes after the first 16 are
+	## ignored. The values are not checked or normalized.
+	decode : List(U8) -> Try(S2LatLng, [Truncated])
+	decode = |bytes| {
+		lat_value = S2Coder.get_f64(bytes, 0)?
+		lng_value = S2Coder.get_f64(bytes, 8)?
+		Ok(S2LatLng.from_radians(lat_value, lng_value))
+	}
 }
 
 ## The text that C's `"%f"` gives for `x`: the correctly rounded value with
@@ -310,3 +326,15 @@ expect S2LatLng.latitude(S2Point.new(1.0, 0.0, -0.0)).radians().to_bits() == 0
 expect S2LatLng.longitude(S2Point.new(1.0, -0.0, 0.0)).radians().to_bits() == 0
 expect S2LatLng.longitude(S2Point.new(-1.0, -0.0, 0.0)).radians() == F64.pi
 expect S2LatLng.longitude(S2Point.new(-1.0, 0.0, 0.0)).radians() == F64.pi
+
+# S2LatLng encoding against upstream's `Encode`, and decoding it back.
+expect S2Coder.to_hex(S2LatLng.from_radians(0.5, -1.25).encode()) == "000000000000e03f000000000000f4bf"
+expect S2LatLng.decode(S2Coder.from_hex("000000000000e03f000000000000f4bf")) == Ok(S2LatLng.from_radians(0.5, -1.25))
+expect S2Coder.to_hex(S2LatLng.from_radians(0.0, 0.0).encode()) == "00000000000000000000000000000000"
+expect S2LatLng.decode(S2Coder.from_hex("00000000000000000000000000000000")) == Ok(S2LatLng.from_radians(0.0, 0.0))
+expect S2Coder.to_hex(S2LatLng.from_radians(10.0, 20.0).encode()) == "00000000000024400000000000003440"
+expect S2LatLng.decode(S2Coder.from_hex("00000000000024400000000000003440")) == Ok(S2LatLng.from_radians(10.0, 20.0))
+
+expect S2LatLng.decode(S2Coder.from_hex("000000000000e03f000000000000f4")) == Err(Truncated)
+expect S2LatLng.decode([]) == Err(Truncated)
+expect S2LatLng.decode(S2Coder.from_hex("000000000000e03f000000000000f4bf00")) == Ok(S2LatLng.from_radians(0.5, -1.25))

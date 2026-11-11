@@ -11,6 +11,7 @@ import Internal/S2Boundary
 import Internal/S2Math
 import S2Point
 import S2Predicates
+import Internal/S2Coder
 
 ## A sequence of points joined by geodesic edges.
 ##
@@ -477,6 +478,41 @@ S2Polyline := { vertices : List(S2Point) }.{
 
 	to_inspect : S2Polyline -> Str
 	to_inspect = |line| "S2Polyline(${line.vertices.len().to_str()} vertices)"
+
+	## The bytes that upstream's `S2Polyline::EncodeUncompressed` writes: the
+	## version byte 1, the number of vertices as a little-endian 32-bit
+	## integer, and the vertices as three little-endian IEEE 754 doubles each.
+	## This is the lossless format. `EncodeMostCompact` is not ported.
+	encode : S2Polyline -> List(U8)
+	encode = |line|
+		line.vertices.fold(
+			[1] |> S2Coder.put_u32(line.vertices.len()),
+			|out, p| out.concat(p.encode()),
+		)
+
+	## The polyline that `encode` writes. Bytes after the vertices are
+	## ignored. The polyline is not checked, so `is_valid` tells whether it is
+	## well formed.
+	##
+	## The version byte 2 is upstream's compressed format, which this port does
+	## not read: that is `UnsupportedCompressedEncoding`. Any other version
+	## byte than 1 is `UnsupportedVersion`.
+	decode : List(U8) -> Try(S2Polyline, [Truncated, UnsupportedVersion(U8), UnsupportedCompressedEncoding])
+	decode = |bytes| {
+		version = S2Coder.get_u8(bytes, 0)?
+		if version == 2 {
+			return Err(UnsupportedCompressedEncoding)
+		}
+		if version != 1 {
+			return Err(UnsupportedVersion(version))
+		}
+		count = S2Coder.get_u32(bytes, 1)?
+		var $vertices = []
+		for i in 0..<count {
+			$vertices = $vertices.append(S2Point.decode(bytes.drop_first(5 + i * 24))?)
+		}
+		Ok({ vertices: $vertices })
+	}
 }
 
 ## The `index`-th vertex, or the zero vector when there is none.
@@ -810,3 +846,21 @@ expect {
 	line = S2Polyline.from_points([S2LatLng.from_degrees(0.0, 0.0).to_point(), S2LatLng.from_degrees(0.0, 10.0).to_point()])
 	!line.contains_point(S2LatLng.from_degrees(0.0, 0.0).to_point()) and !line.contains_point(S2LatLng.from_degrees(0.0, 5.0).to_point())
 }
+
+# S2Polyline encoding against upstream's `Encode`, and decoding it back.
+expect S2Coder.to_hex(S2Polyline.empty().encode()) == "0100000000"
+expect S2Polyline.decode(S2Coder.from_hex("0100000000")) == Ok(S2Polyline.empty())
+expect S2Coder.to_hex(S2Polyline.from_points([S2Point.new(1.0, 0.0, 0.0)]).encode()) == "0101000000000000000000f03f00000000000000000000000000000000"
+expect S2Polyline.decode(S2Coder.from_hex("0101000000000000000000f03f00000000000000000000000000000000")) == Ok(S2Polyline.from_points([S2Point.new(1.0, 0.0, 0.0)]))
+expect S2Coder.to_hex(S2Polyline.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)]).encode()) == "0103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f"
+expect S2Polyline.decode(S2Coder.from_hex("0103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f")) == Ok(S2Polyline.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)]))
+
+# The compressed format is not read, and any other version is not known.
+expect S2Polyline.decode(S2Coder.from_hex("021e0000")) == Err(UnsupportedCompressedEncoding)
+expect S2Polyline.decode(S2Coder.from_hex("0203000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f")) == Err(UnsupportedCompressedEncoding)
+expect S2Polyline.decode(S2Coder.from_hex("0303000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f")) == Err(UnsupportedVersion(3))
+expect S2Polyline.decode(S2Coder.from_hex("0003000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f")) == Err(UnsupportedVersion(0))
+expect S2Polyline.decode([]) == Err(Truncated)
+expect S2Polyline.decode(S2Coder.from_hex("0103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f0")) == Err(Truncated)
+expect S2Polyline.decode(S2Coder.from_hex("01ffffffff")) == Err(Truncated)
+expect S2Polyline.decode(S2Coder.from_hex("0103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03fff")) == S2Polyline.decode(S2Coder.from_hex("0103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f"))

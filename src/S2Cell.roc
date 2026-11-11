@@ -9,6 +9,7 @@ import S2LatLng
 import Internal/S2Lookup
 import S2Metric
 import S2Point
+import Internal/S2Coder
 
 ## The geometry of one cell: its four vertices, its edges, its area, and the
 ## containment tests built on them.
@@ -426,6 +427,21 @@ S2Cell := { id : S2CellId, face : U64, level : U64, orientation : U64, uv : R2Re
 
 	to_inspect : S2Cell -> Str
 	to_inspect = |cell| "S2Cell(${cell.id.to_token()})"
+
+	## The 8 bytes that upstream's `S2Cell::Encode` writes: the id of the cell
+	## as a little-endian 64-bit integer.
+	encode : S2Cell -> List(U8)
+	encode = |cell| cell.id.encode()
+
+	## The cell that `encode` writes. Bytes after the first 8 are ignored.
+	##
+	## An id that is not valid gives `InvalidCellId`. Upstream builds a cell
+	## from such an id without a check, and the cell has no meaning.
+	decode : List(U8) -> Try(S2Cell, [Truncated, InvalidCellId])
+	decode = |bytes| {
+		cell_id = S2CellId.decode(bytes)?
+		if (cell_id.is_valid()) Ok(S2Cell.from_cell_id(cell_id)) else Err(InvalidCellId)
+	}
 }
 
 expect S2Cell.from_face(0).level() == 0
@@ -1452,3 +1468,14 @@ expect S2Cell.from_cell_id(S2CellId.from_face(2).child(1).child(3)).size_st() ==
 # A cell bounds itself, as upstream's S2Cell::GetCellUnionBound does, so a
 # coverer that may use the cell's level returns the cell.
 expect S2Cell.from_cell_id(S2CellId.from_id(9926595690882924544)).cell_union_bound() == [9926595690882924544].map(S2CellId.from_id)
+
+# S2Cell encoding against upstream's `Encode`, and decoding it back.
+expect S2Coder.to_hex(S2Cell.from_face(0).encode()) == "0000000000000010"
+expect S2Cell.decode(S2Coder.from_hex("0000000000000010")) == Ok(S2Cell.from_face(0))
+expect S2Coder.to_hex(S2Cell.from_face(5).encode()) == "00000000000000b0"
+expect S2Cell.decode(S2Coder.from_hex("00000000000000b0")) == Ok(S2Cell.from_face(5))
+
+# An id that is not valid has no cell.
+expect S2Cell.decode(S2Coder.from_hex("0000000000000000")) == Err(InvalidCellId)
+expect S2Cell.decode(S2Coder.from_hex("ffffffffffffffff")) == Err(InvalidCellId)
+expect S2Cell.decode(S2Coder.from_hex("00000000000000")) == Err(Truncated)

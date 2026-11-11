@@ -108,6 +108,16 @@ operations built on it. Those build new geometry out of old, as
 `S2BooleanOperation` does when it returns the polygon where two others overlap,
 and they carry the machinery upstream needs to snap and rebuild the result.
 
+Binary encoding is ported in its lossless form. `S2Point`, `S2LatLng`, `S2Cap`,
+`S2LatLngRect`, `S2CellId`, `S2Cell`, `S2CellUnion`, `S2PointRegion`, `S2Loop`,
+`S2Polyline` and `S2Polygon` each have `encode : T -> List(U8)` and
+`decode : List(U8) -> Try(T, [...])`. The bytes are those of upstream's
+`Encode`, and `decode` reads what upstream's `Decode` reads. The compressed
+formats of `S2Polyline`, `S2Polygon` and `S2Loop` are not ported: `decode`
+gives `Err(UnsupportedCompressedEncoding)` for them. A loop on its own has no
+depth, so `S2Loop.decode` drops the depth field and `S2Loop.encode` writes 0.
+The polygon keeps the depth of each of its loops.
+
 Asking whether one region contains or meets another is a different question,
 and it is answered here: `S2Loop.contains`, `S2Loop.intersects`,
 `S2Polygon.contains_polygon` and `S2Polygon.intersects_polygon`, along with the
@@ -115,8 +125,8 @@ containment already on `S2Cap`, `S2LatLngRect` and `S2CellUnion`. Upstream
 routes those through its index for speed; without one they cost the product of
 the two vertex counts, and the answers are the same.
 
-`src/Internal/` holds `S2Boundary`, `S2Crossing`, `S2Exact`, `S2Format`,
-`S2Lookup` and `S2Math`.
+`src/Internal/` holds `S2Boundary`, `S2Coder`, `S2Crossing`, `S2Exact`,
+`S2Format`, `S2Lookup` and `S2Math`.
 `main.roc` does not expose them: they are the port's own machinery, and no
 consumer names them.
 

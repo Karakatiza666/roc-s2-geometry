@@ -7,6 +7,7 @@ import S2LatLng
 import Internal/S2Lookup
 import Internal/S2Math
 import S2Point
+import Internal/S2Coder
 
 ## A cell in S2's hierarchical decomposition of the sphere, encoded in 64 bits.
 ##
@@ -884,6 +885,16 @@ S2CellId := { id : U64 }.{
 
 	to_inspect : S2CellId -> Str
 	to_inspect = |c| "S2CellId(${c.to_token()})"
+
+	## The 8 bytes that upstream's `S2CellId::Encode` writes: the id as a
+	## little-endian 64-bit integer. Any id can be written, valid or not.
+	encode : S2CellId -> List(U8)
+	encode = |c| S2Coder.put_u64([], c.id)
+
+	## The cell id that `encode` writes. Bytes after the first 8 are ignored.
+	## The id is not checked, so `is_valid` tells whether it names a cell.
+	decode : List(U8) -> Try(S2CellId, [Truncated])
+	decode = |bytes| Ok(S2CellId.from_id(S2Coder.get_u64(bytes, 0)?))
 }
 
 expect S2CellId.none().level() == 0 and !S2CellId.none().is_valid()
@@ -1165,3 +1176,15 @@ expect {
 		},
 	)
 }
+
+# S2CellId encoding against upstream's `Encode`, and decoding it back.
+expect S2Coder.to_hex(S2CellId.none().encode()) == "0000000000000000"
+expect S2CellId.decode(S2Coder.from_hex("0000000000000000")) == Ok(S2CellId.none())
+expect S2Coder.to_hex(S2CellId.from_id(18446744073709551615).encode()) == "ffffffffffffffff"
+expect S2CellId.decode(S2Coder.from_hex("ffffffffffffffff")) == Ok(S2CellId.from_id(18446744073709551615))
+expect S2Coder.to_hex(S2CellId.from_face(0).encode()) == "0000000000000010"
+expect S2CellId.decode(S2Coder.from_hex("0000000000000010")) == Ok(S2CellId.from_face(0))
+
+expect S2CellId.decode(S2Coder.from_hex("00000000000000")) == Err(Truncated)
+expect S2CellId.decode([]) == Err(Truncated)
+expect S2CellId.decode(S2Coder.from_hex("0000000000000010ff")) == Ok(S2CellId.from_face(0))

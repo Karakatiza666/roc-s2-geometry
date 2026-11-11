@@ -182,6 +182,28 @@
 //                                     "line CHAIN", "loop CHAIN" or
 //                                     "poly POLY".
 //
+// Binary encoding. Bytes are written and read as lowercase hex, with "-" for
+// no bytes. A CHAIN, POLY, RECT and P are as before.
+//
+//   code_enc u32|u64|double|varint32|varint64 V
+//   code_enc point P | latlng LAT_RAD LNG_RAD | cap P DEGREES | cap_empty |
+//       cap_full | rect RECT | rect_empty | rect_full | cellid ID | cell ID |
+//       union N ID_1 ... | pointregion P | loop CHAIN | loop_empty |
+//       loop_full | line CHAIN | poly POLY | poly_empty | poly_full
+//                                     the hex of the Encode method. A loop,
+//                                     line and polygon use the lossless
+//                                     form (Encode, EncodeUncompressed)
+//   code_enc line_compact CHAIN | poly_compact POLY
+//                                     EncodeMostCompact, and Encode with
+//                                     CodingHint::COMPACT
+//   code_dec KIND HEX                 "ok" and the hex of the decoded value
+//                                     encoded again, or "err". KIND is as
+//                                     above, plus varint32 and varint64
+//                                     ("ok" VALUE BYTES_READ), double ("ok"
+//                                     and the bits as hex), and cell, which
+//                                     prints "invalid" for an invalid id
+//                                     since upstream cannot build that cell
+//
 // Number formatting, text format, projections, tessellation, term indexing and
 // region unions. TEXT is the rest of the line.
 //
@@ -304,7 +326,10 @@
 #include "s2/s2region_term_indexer.h"
 #include "s2/s2region_union.h"
 #include "s2/s2text_format.h"
+#include "absl/flags/flag.h"
 #include "absl/strings/numbers.h"
+#include "s2/s2debug.h"
+#include "s2/util/coding/coder.h"
 
 namespace {
 
@@ -1402,6 +1427,210 @@ int Answer(const std::string& kind, std::istringstream& in) {
   return 0;
 }
 
+// Binary encoding. The bytes are printed and read as lowercase hex, and "-"
+// stands for no bytes. The Encode methods are the lossless ones.
+std::string ToHex(const unsigned char* data, size_t n) {
+  static const char digits[] = "0123456789abcdef";
+  std::string out;
+  for (size_t i = 0; i < n; ++i) {
+    out += digits[data[i] >> 4];
+    out += digits[data[i] & 15];
+  }
+  return out.empty() ? "-" : out;
+}
+
+std::string ToHex(const Encoder& e) {
+  return ToHex(reinterpret_cast<const unsigned char*>(e.base()), e.length());
+}
+
+std::vector<unsigned char> FromHex(const std::string& text) {
+  std::vector<unsigned char> out;
+  if (text == "-") return out;
+  for (size_t i = 0; i + 1 < text.size(); i += 2) {
+    out.push_back(static_cast<unsigned char>(
+        std::strtoul(text.substr(i, 2).c_str(), nullptr, 16)));
+  }
+  return out;
+}
+
+S2Loop ReadLoop(const std::string& what, std::istringstream& in) {
+  if (what == "loop_empty") return S2Loop(S2Loop::kEmpty());
+  if (what == "loop_full") return S2Loop(S2Loop::kFull());
+  return S2Loop(Chain(in), S2Debug::DISABLE);
+}
+
+std::unique_ptr<S2Polygon> ReadPolygon(const std::string& what,
+                                       std::istringstream& in) {
+  if (what == "poly_empty") return std::make_unique<S2Polygon>();
+  if (what == "poly_full") {
+    return std::make_unique<S2Polygon>(
+        std::make_unique<S2Loop>(S2Loop::kFull()));
+  }
+  return Polygon(in);
+}
+
+// code_enc KIND ... prints the hex of the encoding; code_dec KIND HEX prints
+// "ok" and the hex of the decoded value encoded again, or "err".
+int Coding(const std::string& op, std::istringstream& in) {
+  absl::SetFlag(&FLAGS_s2debug, false);
+  std::string kind;
+  in >> kind;
+  Encoder enc;
+  enc.Ensure(64);
+  if (op == "code_enc") {
+    if (kind == "u32") {
+      unsigned long long v;
+      in >> v;
+      enc.put32(static_cast<uint32_t>(v));
+    } else if (kind == "u64") {
+      unsigned long long v;
+      in >> v;
+      enc.put64(v);
+    } else if (kind == "double") {
+      enc.putdouble(Number(in));
+    } else if (kind == "varint32") {
+      unsigned long long v;
+      in >> v;
+      enc.put_varint32(static_cast<uint32_t>(v));
+    } else if (kind == "varint64") {
+      unsigned long long v;
+      in >> v;
+      enc.put_varint64(v);
+    } else if (kind == "point") {
+      Point(in).Encode(&enc);
+    } else if (kind == "latlng") {
+      double lat = Number(in), lng = Number(in);
+      S2LatLng(S1Angle::Radians(lat), S1Angle::Radians(lng)).Encode(&enc);
+    } else if (kind == "cap_empty") {
+      S2Cap::Empty().Encode(&enc);
+    } else if (kind == "cap_full") {
+      S2Cap::Full().Encode(&enc);
+    } else if (kind == "cap") {
+      S2Point p = Point(in);
+      S2Cap(p, S1Angle::Degrees(Number(in))).Encode(&enc);
+    } else if (kind == "rect_empty") {
+      S2LatLngRect::Empty().Encode(&enc);
+    } else if (kind == "rect_full") {
+      S2LatLngRect::Full().Encode(&enc);
+    } else if (kind == "rect") {
+      Rect(in).Encode(&enc);
+    } else if (kind == "cellid") {
+      Id(in).Encode(&enc);
+    } else if (kind == "cell") {
+      S2Cell(Id(in)).Encode(&enc);
+    } else if (kind == "union") {
+      int count;
+      in >> count;
+      std::vector<S2CellId> ids;
+      for (int i = 0; i < count; ++i) ids.push_back(Id(in));
+      S2CellUnion::FromVerbatim(std::move(ids)).Encode(&enc);
+    } else if (kind == "pointregion") {
+      S2PointRegion(Point(in)).Encode(&enc);
+    } else if (kind == "loop" || kind == "loop_empty" || kind == "loop_full") {
+      ReadLoop(kind, in).Encode(&enc);
+    } else if (kind == "line") {
+      S2Polyline(Chain(in), S2Debug::DISABLE).EncodeUncompressed(&enc);
+    } else if (kind == "poly" || kind == "poly_empty" || kind == "poly_full") {
+      ReadPolygon(kind, in)->EncodeUncompressed(&enc);
+    } else if (kind == "line_compact") {
+      S2Polyline(Chain(in), S2Debug::DISABLE).EncodeMostCompact(&enc);
+    } else if (kind == "poly_compact") {
+      ReadPolygon(kind, in)->Encode(&enc, s2coding::CodingHint::COMPACT);
+    } else {
+      return Fail(op + " " + kind);
+    }
+    std::printf("%s\n", ToHex(enc).c_str());
+    return 0;
+  }
+  std::string text;
+  in >> text;
+  std::vector<unsigned char> bytes = FromHex(text);
+  Decoder dec(bytes.data(), bytes.size());
+  bool ok = false;
+  if (kind == "varint32" || kind == "varint64") {
+    uint64_t v = 0;
+    uint32_t v32 = 0;
+    ok = kind == "varint32" ? dec.get_varint32(&v32) : dec.get_varint64(&v);
+    if (ok) {
+      std::printf("ok %llu %zu\n",
+                  static_cast<unsigned long long>(kind == "varint32" ? v32 : v),
+                  dec.pos());
+    } else {
+      std::printf("err\n");
+    }
+    return 0;
+  } else if (kind == "double") {
+    if (dec.avail() < 8) {
+      std::printf("err\n");
+    } else {
+      uint64_t bits = dec.get64();
+      std::printf("ok %016llx\n", static_cast<unsigned long long>(bits));
+    }
+    return 0;
+  } else if (kind == "point") {
+    S2Point p;
+    S2Error error;
+    ok = p.Init(&dec, error);
+    if (ok) p.Encode(&enc);
+  } else if (kind == "latlng") {
+    S2LatLng ll;
+    S2Error error;
+    ok = ll.Init(&dec, error);
+    if (ok) ll.Encode(&enc);
+  } else if (kind == "cap") {
+    S2Cap v;
+    ok = v.Decode(&dec);
+    if (ok) v.Encode(&enc);
+  } else if (kind == "rect") {
+    S2LatLngRect v;
+    ok = v.Decode(&dec);
+    if (ok) v.Encode(&enc);
+  } else if (kind == "cellid") {
+    S2CellId v;
+    ok = v.Decode(&dec);
+    if (ok) v.Encode(&enc);
+  } else if (kind == "cell") {
+    // S2Cell(id) requires a valid id, so an invalid one is told apart.
+    S2CellId id;
+    ok = id.Decode(&dec);
+    if (ok && !id.is_valid()) {
+      std::printf("invalid\n");
+      return 0;
+    }
+    if (ok) S2Cell(id).Encode(&enc);
+  } else if (kind == "union") {
+    S2CellUnion v;
+    ok = v.Decode(&dec);
+    if (ok) v.Encode(&enc);
+  } else if (kind == "pointregion") {
+    S2PointRegion v((S2Point(1, 0, 0)));
+    ok = v.Decode(&dec);
+    if (ok) v.Encode(&enc);
+  } else if (kind == "loop") {
+    S2Loop v;
+    ok = v.Decode(&dec);
+    if (ok) v.Encode(&enc);
+  } else if (kind == "line") {
+    S2Polyline v;
+    v.set_s2debug_override(S2Debug::DISABLE);
+    ok = v.Decode(&dec);
+    if (ok) v.EncodeUncompressed(&enc);
+  } else if (kind == "poly") {
+    S2Polygon v;
+    v.set_s2debug_override(S2Debug::DISABLE);
+    ok = v.Decode(&dec);
+    if (ok) v.EncodeUncompressed(&enc);
+  } else {
+    return Fail(op + " " + kind);
+  }
+  if (ok) {
+    std::printf("ok %s\n", ToHex(enc).c_str());
+  } else {
+    std::printf("err\n");
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -1625,6 +1854,8 @@ int main() {
       S2CellUnion u = S2CellUnion::FromVerbatim(std::move(ids));
       PrintIds(u.cell_ids());
       std::printf(" | %d %d\n", u.IsValid() ? 1 : 0, u.IsNormalized() ? 1 : 0);
+    } else if (kind == "code_enc" || kind == "code_dec") {
+      if (Coding(kind, in) != 0) return 1;
     } else if (Answer(kind, in) != 0) {
       return 1;
     }

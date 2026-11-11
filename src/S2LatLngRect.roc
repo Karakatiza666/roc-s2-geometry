@@ -10,6 +10,7 @@ import S2Edge
 import S2LatLng
 import Internal/S2Math
 import S2Point
+import Internal/S2Coder
 
 ## A rectangle in latitude-longitude space: a latitude interval crossed with a
 ## longitude interval.
@@ -660,6 +661,41 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 
 	to_inspect : S2LatLngRect -> Str
 	to_inspect = |r| "S2LatLngRect(${r.lo().to_inspect()}, ${r.hi().to_inspect()})"
+
+	## The 33 bytes that upstream's `S2LatLngRect::Encode` writes: the version
+	## byte 1, then the low and high latitude and the low and high longitude in
+	## radians, each as a little-endian IEEE 754 double.
+	encode : S2LatLngRect -> List(U8)
+	encode = |r|
+		[1]
+			|> S2Coder.put_f64(r.lat.lo())
+			|> S2Coder.put_f64(r.lat.hi())
+			|> S2Coder.put_f64(r.lng.lo())
+			|> S2Coder.put_f64(r.lng.hi())
+
+	## The rectangle that `encode` writes. Bytes after the first 33 are
+	## ignored.
+	##
+	## A version byte above 1 is `UnsupportedVersion`, as upstream's `Decode`
+	## refuses it. A rectangle that is not valid is `InvalidRect`: a latitude
+	## beyond the poles, a longitude outside the circle, or an interval that is
+	## empty in only one dimension.
+	decode : List(U8) -> Try(S2LatLngRect, [Truncated, UnsupportedVersion(U8), InvalidRect])
+	decode = |bytes| {
+		if !S2Coder.can_read(bytes, 0, 33) {
+			return Err(Truncated)
+		}
+		version = S2Coder.get_u8(bytes, 0)?
+		if version > 1 {
+			return Err(UnsupportedVersion(version))
+		}
+		south = S2Coder.get_f64(bytes, 1)?
+		north = S2Coder.get_f64(bytes, 9)?
+		west = S2Coder.get_f64(bytes, 17)?
+		east = S2Coder.get_f64(bytes, 25)?
+		rect = S2LatLngRect.new(R1Interval.new(south, north), S1Interval.new(west, east))
+		if (rect.is_valid()) Ok(rect) else Err(InvalidRect)
+	}
 }
 
 expect S2LatLngRect.empty().is_empty()
@@ -1386,3 +1422,19 @@ expect {
 	rect = S2LatLngRect.from_point_pair(S2LatLng.from_degrees(-10.0, -20.0), S2LatLng.from_degrees(30.0, 40.0))
 	rect.rect_bound() == rect
 }
+
+# S2LatLngRect encoding against upstream's `Encode`, and decoding it back.
+expect S2Coder.to_hex(S2LatLngRect.empty().encode()) == "01000000000000f03f0000000000000000182d4454fb210940182d4454fb2109c0"
+expect S2LatLngRect.decode(S2Coder.from_hex("01000000000000f03f0000000000000000182d4454fb210940182d4454fb2109c0")) == Ok(S2LatLngRect.empty())
+expect S2Coder.to_hex(S2LatLngRect.full().encode()) == "01182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb210940"
+expect S2LatLngRect.decode(S2Coder.from_hex("01182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) == Ok(S2LatLngRect.full())
+expect S2Coder.to_hex(S2LatLngRect.new(R1Interval.new(-0.5, 0.5), S1Interval.new(-1.0, 2.0)).encode()) == "01000000000000e0bf000000000000e03f000000000000f0bf0000000000000040"
+expect S2LatLngRect.decode(S2Coder.from_hex("01000000000000e0bf000000000000e03f000000000000f0bf0000000000000040")) == Ok(S2LatLngRect.new(R1Interval.new(-0.5, 0.5), S1Interval.new(-1.0, 2.0)))
+
+# Upstream refuses a rectangle that is not valid, and a version above 1.
+expect S2LatLngRect.decode(S2Coder.from_hex("01000000000000004000000000000008400000000000000000000000000000f03f")) == Err(InvalidRect)
+expect S2LatLngRect.decode(S2Coder.from_hex("01000000000000f03f00000000000000000000000000000000000000000000f03f")) == Err(InvalidRect)
+expect S2LatLngRect.decode(S2Coder.from_hex("02000000000000e0bf000000000000e03f000000000000f0bf0000000000000040")) == Err(UnsupportedVersion(2))
+expect S2LatLngRect.decode(S2Coder.from_hex("00000000000000e0bf000000000000e03f000000000000f0bf0000000000000040")) == S2LatLngRect.decode(S2Coder.from_hex("01000000000000e0bf000000000000e03f000000000000f0bf0000000000000040"))
+expect S2LatLngRect.decode(S2Coder.from_hex("01000000000000e0bf000000000000e03f000000000000f0bf00000000000000")) == Err(Truncated)
+expect S2LatLngRect.decode([]) == Err(Truncated)

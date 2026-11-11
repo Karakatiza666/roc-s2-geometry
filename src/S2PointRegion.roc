@@ -5,6 +5,7 @@ import S2LatLng
 import S2LatLngRect
 import S2Point
 import S2RegionCoverer
+import Internal/S2Coder
 
 ## A single point, as a region. Upstream's `S2PointRegion`.
 ##
@@ -61,6 +62,29 @@ S2PointRegion := { point : S2Point }.{
 
 	to_inspect : S2PointRegion -> Str
 	to_inspect = |region| "S2PointRegion(${region.point.to_inspect()})"
+
+	## The 25 bytes that upstream's `S2PointRegion::Encode` writes: the version
+	## byte 1 and the three coordinates, each as a little-endian IEEE 754
+	## double.
+	encode : S2PointRegion -> List(U8)
+	encode = |region| [1].concat(region.point.encode())
+
+	## The region that `encode` writes. Bytes after the first 25 are ignored.
+	##
+	## A version byte above 1 is `UnsupportedVersion`. A point that is not
+	## unit length is `NotUnitLength`, as upstream refuses it.
+	decode : List(U8) -> Try(S2PointRegion, [Truncated, UnsupportedVersion(U8), NotUnitLength])
+	decode = |bytes| {
+		if !S2Coder.can_read(bytes, 0, 25) {
+			return Err(Truncated)
+		}
+		version = S2Coder.get_u8(bytes, 0)?
+		if version > 1 {
+			return Err(UnsupportedVersion(version))
+		}
+		vector = S2Point.decode(bytes.drop_first(1))?
+		if (vector.is_unit_length()) Ok({ point: vector }) else Err(NotUnitLength)
+	}
 }
 
 # Upstream's S2PointRegionTest.Basic.
@@ -91,3 +115,16 @@ expect {
 
 # Only the cells that hold the point meet the region.
 expect !S2PointRegion.new(S2Point.new(1.0, 0.0, 0.0)).may_intersect_cell(S2Cell.from_face(3))
+
+# S2PointRegion encoding against upstream's `Encode`, and decoding it back.
+expect S2Coder.to_hex(S2PointRegion.new(S2Point.new(1.0, 0.0, 0.0)).encode()) == "01000000000000f03f00000000000000000000000000000000"
+expect S2PointRegion.decode(S2Coder.from_hex("01000000000000f03f00000000000000000000000000000000")) == Ok(S2PointRegion.new(S2Point.new(1.0, 0.0, 0.0)))
+expect S2Coder.to_hex(S2PointRegion.new(S2Point.new(0.0, 0.0, -1.0)).encode()) == "0100000000000000000000000000000000000000000000f0bf"
+expect S2PointRegion.decode(S2Coder.from_hex("0100000000000000000000000000000000000000000000f0bf")) == Ok(S2PointRegion.new(S2Point.new(0.0, 0.0, -1.0)))
+
+expect S2PointRegion.decode(S2Coder.from_hex("01000000000000004000000000000008400000000000001040")) == Err(NotUnitLength)
+expect S2PointRegion.decode(S2Coder.from_hex("01000000000000000000000000000000000000000000000000")) == Err(NotUnitLength)
+expect S2PointRegion.decode(S2Coder.from_hex("02000000000000f03f00000000000000000000000000000000")) == Err(UnsupportedVersion(2))
+expect S2PointRegion.decode(S2Coder.from_hex("00000000000000f03f00000000000000000000000000000000")) == S2PointRegion.decode(S2Coder.from_hex("01000000000000f03f00000000000000000000000000000000"))
+expect S2PointRegion.decode(S2Coder.from_hex("01000000000000f03f000000000000000000000000000000")) == Err(Truncated)
+expect S2PointRegion.decode([]) == Err(Truncated)

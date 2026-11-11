@@ -1,5 +1,6 @@
 import S1Angle
 import Internal/S2Math
+import Internal/S2Coder
 
 ## A point in three-dimensional Euclidean space.
 ##
@@ -423,6 +424,25 @@ S2Point := { x : F64, y : F64, z : F64 }.{
 
 	to_inspect : S2Point -> Str
 	to_inspect = |p| "S2Point(${p.x.to_str()}, ${p.y.to_str()}, ${p.z.to_str()})"
+
+	## The 24 bytes that upstream's `S2Point::Encode` writes: the three
+	## coordinates, each as a little-endian IEEE 754 double. There is no
+	## version byte.
+	##
+	## A NaN coordinate is written as the quiet NaN, so its payload is lost.
+	## Every other value keeps its bits.
+	encode : S2Point -> List(U8)
+	encode = |p| [] |> S2Coder.put_f64(p.x) |> S2Coder.put_f64(p.y) |> S2Coder.put_f64(p.z)
+
+	## The point that `encode` writes. Bytes after the first 24 are ignored.
+	## The point is not checked for unit length, as upstream does not check it.
+	decode : List(U8) -> Try(S2Point, [Truncated])
+	decode = |bytes| {
+		px = S2Coder.get_f64(bytes, 0)?
+		py = S2Coder.get_f64(bytes, 8)?
+		pz = S2Coder.get_f64(bytes, 16)?
+		Ok(S2Point.new(px, py, pz))
+	}
 }
 
 min_f64 : F64, F64 -> F64
@@ -604,3 +624,23 @@ expect S2Point.edge_true_centroid(S2Point.new(1.0, 0.0, 0.0), S2Point.new(-1.0, 
 expect S2Point.edge_true_centroid(S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 0.0, 0.0)) == S2Point.zero()
 expect S2Point.edge_true_centroid(S2Point.new(0.6, 0.8, 0.0), S2Point.new(0.0, 0.6, 0.8))
 	== S2Point.new(0.35564938701829146, 0.82984856970934673, 0.47419918269105532)
+
+# S2Point encoding against upstream's `Encode`, and decoding it back.
+expect S2Coder.to_hex(S2Point.new(1.0, 0.0, 0.0).encode()) == "000000000000f03f00000000000000000000000000000000"
+expect S2Point.decode(S2Coder.from_hex("000000000000f03f00000000000000000000000000000000")) == Ok(S2Point.new(1.0, 0.0, 0.0))
+expect S2Coder.to_hex(S2Point.new(0.6, 0.8, 0.0).encode()) == "333333333333e33f9a9999999999e93f0000000000000000"
+expect S2Point.decode(S2Coder.from_hex("333333333333e33f9a9999999999e93f0000000000000000")) == Ok(S2Point.new(0.6, 0.8, 0.0))
+expect S2Coder.to_hex(S2Point.new(-0.0, 0.0, 1.0).encode()) == "00000000000000800000000000000000000000000000f03f"
+expect S2Point.decode(S2Coder.from_hex("00000000000000800000000000000000000000000000f03f")) == Ok(S2Point.new(-0.0, 0.0, 1.0))
+expect S2Coder.to_hex(S2Point.new(-1.5, 2.5e-300, 4.9406564584124654e-324).encode()) == "000000000000f8bf2f30b7b3a7c9ba010100000000000000"
+expect S2Point.decode(S2Coder.from_hex("000000000000f8bf2f30b7b3a7c9ba010100000000000000")) == Ok(S2Point.new(-1.5, 2.5e-300, 4.9406564584124654e-324))
+
+# Short input is refused, and bytes after the point are ignored.
+expect S2Point.decode(S2Coder.from_hex("000000000000f03f000000000000000000000000000000")) == Err(Truncated)
+expect S2Point.decode([]) == Err(Truncated)
+expect S2Point.decode(S2Coder.from_hex("000000000000f03f00000000000000000000000000000000ff")) == Ok(S2Point.new(1.0, 0.0, 0.0))
+# A point is not checked for unit length.
+expect S2Point.decode(S2Coder.from_hex("000000000000004000000000000008400000000000001040")) == Ok(S2Point.new(2.0, 3.0, 4.0))
+# A NaN is written as the quiet NaN, as the C library writes the NaN of `strtod`.
+expect S2Coder.to_hex(S2Point.new(F64.nan, 0.0, 0.0).encode()) == "000000000000f87f00000000000000000000000000000000"
+expect S2Coder.to_hex(S2Point.new(F64.infinity, -F64.infinity, 0.0).encode()) == "000000000000f07f000000000000f0ff0000000000000000"

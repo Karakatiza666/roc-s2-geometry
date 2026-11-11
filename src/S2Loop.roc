@@ -8,6 +8,7 @@ import S2LatLng
 import S2LatLngRect
 import Internal/S2Boundary
 import S2Point
+import Internal/S2Coder
 
 ## A simple closed polygon on the sphere: a sequence of vertices joined by
 ## geodesic edges, with the last vertex joined back to the first.
@@ -694,6 +695,64 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 
 	to_inspect : S2Loop -> Str
 	to_inspect = |loop| "S2Loop(${loop.vertices.len().to_str()} vertices)"
+
+	## The bytes that upstream's `S2Loop::Encode` writes: the version byte 1,
+	## the number of vertices as a little-endian 32-bit integer, the vertices
+	## as three little-endian IEEE 754 doubles each, the byte for
+	## `origin_inside`, the nesting depth as a 32-bit integer, and the
+	## encoding of the bounding rectangle (`S2LatLngRect.encode`).
+	##
+	## A loop on its own has depth 0. The loops of a polygon are written by
+	## `S2Polygon.encode` with their own depths. The compressed form of
+	## upstream's loop is not written.
+	encode : S2Loop -> List(U8)
+	encode = |loop| encode_with_depth(loop, 0)
+
+	## The loop that `encode` writes. Bytes after the loop are ignored.
+	##
+	## Upstream's `Decode` trusts the stored `origin_inside` and bound without
+	## a check, and so does this function. A loop with no vertex is allowed.
+	## The depth is read and dropped, because this loop has no depth.
+	##
+	## A version byte other than 1 is `UnsupportedVersion`. More than 50000000
+	## vertices is `TooManyVertices`, which is the default limit of upstream's
+	## flag `s2polygon_decode_max_num_vertices`. The bounding rectangle can
+	## give any error of `S2LatLngRect.decode`.
+	decode : List(U8) -> Try(S2Loop, [Truncated, UnsupportedVersion(U8), TooManyVertices, InvalidRect])
+	decode = |bytes| {
+		version = S2Coder.get_u8(bytes, 0)?
+		if version != 1 {
+			return Err(UnsupportedVersion(version))
+		}
+		count = S2Coder.get_u32(bytes, 1)?
+		if count > 50000000 {
+			return Err(TooManyVertices)
+		}
+		tail = 5 + count * 24
+		if !S2Coder.can_read(bytes, tail, 5) {
+			return Err(Truncated)
+		}
+		var $vertices = []
+		for i in 0..<count {
+			$vertices = $vertices.append(S2Point.decode(bytes.drop_first(5 + i * 24))?)
+		}
+		origin_inside = S2Coder.get_u8(bytes, tail)? != 0
+		bound = S2LatLngRect.decode(bytes.drop_first(tail + 5))?
+		Ok({ vertices: $vertices, origin_inside: origin_inside, bound: bound })
+	}
+}
+
+## The encoding of the loop with the given depth in the field for it.
+encode_with_depth : S2Loop, U64 -> List(U8)
+encode_with_depth = |loop, depth| {
+	out = loop.vertices.fold(
+		[1] |> S2Coder.put_u32(loop.vertices.len()),
+		|acc, p| acc.concat(p.encode()),
+	)
+	out
+		|> S2Coder.put_u8(if (loop.origin_inside) 1 else 0)
+		|> S2Coder.put_u32(depth)
+		|> List.concat(loop.bound.encode())
 }
 
 ## The edge of the loop nearest to `x`, by a scan of every edge.
@@ -1278,3 +1337,27 @@ expect S2Loop.from_lat_lngs([S2LatLng.from_degrees(-1.0, -1.0), S2LatLng.from_de
 
 # The full loop is near only itself.
 expect S2Loop.full().boundary_near(S2Loop.full(), S1Angle.from_radians(1e-15)) and !S2Loop.full().boundary_near(S2Loop.empty(), S1Angle.from_radians(1e-15))
+
+# S2Loop encoding against upstream's `Encode`, and decoding it back.
+expect S2Coder.to_hex(S2Loop.empty().encode()) == "010100000000000000000000000000000000000000000000000000f03f000000000001000000000000f03f0000000000000000182d4454fb210940182d4454fb2109c0"
+expect S2Loop.decode(S2Coder.from_hex("010100000000000000000000000000000000000000000000000000f03f000000000001000000000000f03f0000000000000000182d4454fb210940182d4454fb2109c0")) == Ok(S2Loop.empty())
+expect S2Coder.to_hex(S2Loop.full().encode()) == "010100000000000000000000000000000000000000000000000000f0bf010000000001182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb210940"
+expect S2Loop.decode(S2Coder.from_hex("010100000000000000000000000000000000000000000000000000f0bf010000000001182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) == Ok(S2Loop.full())
+expect S2Coder.to_hex(S2Loop.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)]).encode()) == "0103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940"
+expect S2Loop.decode(S2Coder.from_hex("0103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) == Ok(S2Loop.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)]))
+expect S2Coder.to_hex(S2Loop.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 0.0, 1.0), S2Point.new(0.0, 1.0, 0.0)]).encode()) == "0103000000000000000000f03f0000000000000000000000000000000000000000000000000000000000000000000000000000f03f0000000000000000000000000000f03f0000000000000000010000000001182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb210940"
+expect S2Loop.decode(S2Coder.from_hex("0103000000000000000000f03f0000000000000000000000000000000000000000000000000000000000000000000000000000f03f0000000000000000000000000000f03f0000000000000000010000000001182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) == Ok(S2Loop.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 0.0, 1.0), S2Point.new(0.0, 1.0, 0.0)]))
+
+# A loop is refused under any version but 1, and at every truncation.
+expect S2Loop.decode(S2Coder.from_hex("0003000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) == Err(UnsupportedVersion(0))
+expect S2Loop.decode(S2Coder.from_hex("0203000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) == Err(UnsupportedVersion(2))
+expect S2Loop.decode([]) == Err(Truncated)
+expect S2Loop.decode(S2Coder.from_hex("0103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb2109")) == Err(Truncated)
+expect S2Loop.decode(S2Coder.from_hex("0103000000")) == Err(Truncated)
+expect S2Loop.decode(S2Coder.from_hex("01ffffffff")) == Err(TooManyVertices)
+expect S2Loop.decode(S2Coder.from_hex("0181f0fa02")) == Err(TooManyVertices)
+expect S2Loop.decode(S2Coder.from_hex("0140420f00")) == Err(Truncated)
+# A loop with no vertex is allowed, and so is a bound that does not fit the vertices: both are trusted.
+expect S2Loop.decode(S2Coder.from_hex("0100000000000000000001000000000000f03f0000000000000000182d4454fb210940182d4454fb2109c0")) |> Try.is_ok
+expect S2Loop.decode(S2Coder.from_hex("0103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940ff")) == S2Loop.decode(S2Coder.from_hex("0103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940"))
+expect S2Loop.decode(S2Coder.from_hex("0103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f020000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) |> Try.is_ok

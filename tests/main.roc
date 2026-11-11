@@ -11,8 +11,10 @@ package
 		s2: "../src/main.roc",
 	}
 
+import CodingCorpus
 import S2CellIdTest
 import S2CellTest
+import S2CodingTest
 import S2CellUnionTest
 import S2ExactTest
 import S2LoopRelationTest

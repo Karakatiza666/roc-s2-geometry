@@ -38,6 +38,11 @@ s2geometry
              the port. See the comment at the top of tools/s2_oracle.cc for
              the list of queries.
 
+             tests/CodingCorpus.roc holds the bytes that upstream's Encode
+             methods write for points, caps, rectangles, cells, cell unions,
+             loops, polylines and polygons, and its verdicts on malformed
+             input. tools/generate_coding_corpus.py writes it from the driver.
+
 s2sphere
   https://github.com/sidewalklabs/s2sphere
   revision   master, 2026-08-30

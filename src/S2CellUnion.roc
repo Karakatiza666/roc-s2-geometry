@@ -6,6 +6,7 @@ import S2LatLng
 import S2LatLngRect
 import S2Metric
 import S2Point
+import Internal/S2Coder
 
 ## A set of cells, held in normalized form: sorted, with no cell contained in
 ## another, and with no four siblings that could be replaced by their parent.
@@ -394,6 +395,46 @@ S2CellUnion := { ids : List(S2CellId) }.{
 
 	to_inspect : S2CellUnion -> Str
 	to_inspect = |u| "S2CellUnion(${u.ids.len().to_str()} cells)"
+
+	## The bytes that upstream's `S2CellUnion::Encode` writes: the version byte
+	## 1, the number of cells as a little-endian 64-bit integer, and then each
+	## cell id as a little-endian 64-bit integer, in the order of the union.
+	encode : S2CellUnion -> List(U8)
+	encode = |u|
+		u.ids.fold(
+			[1] |> S2Coder.put_u64(u.ids.len()),
+			|out, id| S2Coder.put_u64(out, id.id()),
+		)
+
+	## The union that `encode` writes. Bytes after the cells are ignored.
+	##
+	## The cells are used as they are, as `from_verbatim` does: upstream's
+	## `Decode` does not normalize them. A version byte above 1 is
+	## `UnsupportedVersion`. More than 1000000 cells is `TooManyCells`, which is
+	## the default limit of upstream's flag `s2cell_union_decode_max_num_cells`.
+	decode : List(U8) -> Try(S2CellUnion, [Truncated, UnsupportedVersion(U8), TooManyCells])
+	decode = |bytes| {
+		if !S2Coder.can_read(bytes, 0, 9) {
+			return Err(Truncated)
+		}
+		version = S2Coder.get_u8(bytes, 0)?
+		if version > 1 {
+			return Err(UnsupportedVersion(version))
+		}
+		count = S2Coder.get_u64(bytes, 1)?
+		if count > 1000000 {
+			return Err(TooManyCells)
+		}
+		if !S2Coder.can_read(bytes, 9, count * 8) {
+			return Err(Truncated)
+		}
+		var $ids = []
+		for i in 0..<count {
+			id = S2Coder.get_u64(bytes, 9 + i * 8)?
+			$ids = $ids.append(S2CellId.from_id(id))
+		}
+		Ok(S2CellUnion.from_verbatim($ids))
+	}
 }
 
 expect S2CellUnion.empty().is_empty()
@@ -727,3 +768,22 @@ expect {
 
 # Upstream's GetCellUnionBound, through tools/s2_oracle.cc.
 expect S2CellUnion.from_cell_ids([9926595690882924544, 9926595690882924545, 1152921504606846976].map(S2CellId.from_id)).cell_union_bound() == [1152921504606846976, 3458764513820540928, 5764607523034234880, 8070450532247928832, 10376293541461622784, 12682136550675316736].map(S2CellId.from_id)
+
+# S2CellUnion encoding against upstream's `Encode`, and decoding it back.
+expect S2Coder.to_hex(S2CellUnion.empty().encode()) == "010000000000000000"
+expect S2CellUnion.decode(S2Coder.from_hex("010000000000000000")) == Ok(S2CellUnion.empty())
+expect S2Coder.to_hex(S2CellUnion.from_verbatim([S2CellId.from_face(0), S2CellId.from_face(5)]).encode()) == "010200000000000000000000000000001000000000000000b0"
+expect S2CellUnion.decode(S2Coder.from_hex("010200000000000000000000000000001000000000000000b0")) == Ok(S2CellUnion.from_verbatim([S2CellId.from_face(0), S2CellId.from_face(5)]))
+expect S2Coder.to_hex(S2CellUnion.from_verbatim([S2CellId.from_face(5), S2CellId.from_face(0), S2CellId.from_face(0), S2CellId.none()]).encode()) == "01040000000000000000000000000000b0000000000000001000000000000000100000000000000000"
+expect S2CellUnion.decode(S2Coder.from_hex("01040000000000000000000000000000b0000000000000001000000000000000100000000000000000")) == Ok(S2CellUnion.from_verbatim([S2CellId.from_face(5), S2CellId.from_face(0), S2CellId.from_face(0), S2CellId.none()]))
+
+expect S2CellUnion.decode(S2Coder.from_hex("020200000000000000000000000000001000000000000000a0")) == Err(UnsupportedVersion(2))
+expect S2CellUnion.decode(S2Coder.from_hex("000200000000000000000000000000001000000000000000a0")) == S2CellUnion.decode(S2Coder.from_hex("010200000000000000000000000000001000000000000000a0"))
+# The count may not pass 1000000, and the cells must be there.
+expect S2CellUnion.decode(S2Coder.from_hex("01ffffffffffffffff")) == Err(TooManyCells)
+expect S2CellUnion.decode(S2Coder.from_hex("0140420f0000000000")) == Err(Truncated)
+expect S2CellUnion.decode(S2Coder.from_hex("0141420f0000000000")) == Err(TooManyCells)
+expect S2CellUnion.decode(S2Coder.from_hex("0102000000000000000000000000000010")) == Err(Truncated)
+expect S2CellUnion.decode(S2Coder.from_hex("01000000000000")) == Err(Truncated)
+expect S2CellUnion.decode([]) == Err(Truncated)
+expect S2CellUnion.decode(S2Coder.from_hex("010200000000000000000000000000001000000000000000a000")) == S2CellUnion.decode(S2Coder.from_hex("010200000000000000000000000000001000000000000000a0"))

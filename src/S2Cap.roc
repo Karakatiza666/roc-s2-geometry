@@ -7,6 +7,7 @@ import S2Edge
 import S2LatLng
 import S2Metric
 import S2Point
+import Internal/S2Coder
 
 ## A disc on the sphere: every point within a given angle of a centre.
 ##
@@ -334,6 +335,23 @@ S2Cap := { center : S2Point, radius : S1ChordAngle }.{
 	to_inspect : S2Cap -> Str
 	to_inspect = |cap|
 		"S2Cap(${cap.center.to_inspect()}, ${cap.radius_angle().degrees().to_str()} deg)"
+
+	## The 32 bytes that upstream's `S2Cap::Encode` writes: the three
+	## coordinates of the centre and the squared chord length of the radius,
+	## each as a little-endian IEEE 754 double. There is no version byte.
+	encode : S2Cap -> List(U8)
+	encode = |cap|
+		cap.center.encode().concat(S2Coder.put_f64([], cap.radius.length2()))
+
+	## The cap that `encode` writes. Bytes after the first 32 are ignored.
+	## The cap is not checked, as upstream does not check it unless its
+	## debug flag is on.
+	decode : List(U8) -> Try(S2Cap, [Truncated])
+	decode = |bytes| {
+		point = S2Point.decode(bytes)?
+		length2 = S2Coder.get_f64(bytes, 24)?
+		Ok({ center: point, radius: S1ChordAngle.from_length2(length2) })
+	}
 }
 
 expect S2Cap.empty().is_empty()
@@ -561,3 +579,16 @@ expect S2Cap.from_point(S2Point.new(1.0, 0.0, 0.0)).cell_union_bound() == [11529
 expect S2Cap.from_center_angle(S2LatLng.from_degrees(10.0, 20.0).to_point(), S1Angle.from_degrees(5.0)).cell_union_bound() == [1224979098644774912, 1657324662872342528, 1369094286720630784, 1513209474796486656].map(S2CellId.from_id)
 expect S2Cap.from_center_angle(S2LatLng.from_degrees(10.0, 20.0).to_point(), S1Angle.from_degrees(120.0)).cell_union_bound() == [1152921504606846976, 3458764513820540928, 5764607523034234880, 8070450532247928832, 10376293541461622784, 12682136550675316736].map(S2CellId.from_id)
 expect S2Cap.empty().cell_union_bound() == [1152921504606846980, 1152921504606846972, 1921535841011411628, 384307168202282324].map(S2CellId.from_id)
+
+# S2Cap encoding against upstream's `Encode`, and decoding it back.
+expect S2Coder.to_hex(S2Cap.empty().encode()) == "000000000000f03f00000000000000000000000000000000000000000000f0bf"
+expect S2Cap.decode(S2Coder.from_hex("000000000000f03f00000000000000000000000000000000000000000000f0bf")) == Ok(S2Cap.empty())
+expect S2Coder.to_hex(S2Cap.full().encode()) == "000000000000f03f000000000000000000000000000000000000000000001040"
+expect S2Cap.decode(S2Coder.from_hex("000000000000f03f000000000000000000000000000000000000000000001040")) == Ok(S2Cap.full())
+expect S2Coder.to_hex(S2Cap.from_center_angle(S2Point.new(1.0, 0.0, 0.0), S1Angle.from_degrees(10.0)).encode()) == "000000000000f03f0000000000000000000000000000000028fab8df1c1d9f3f"
+expect S2Cap.decode(S2Coder.from_hex("000000000000f03f0000000000000000000000000000000028fab8df1c1d9f3f")) == Ok(S2Cap.from_center_angle(S2Point.new(1.0, 0.0, 0.0), S1Angle.from_degrees(10.0)))
+
+expect S2Cap.decode(S2Coder.from_hex("000000000000f03f0000000000000000000000000000000028fab8df1c1d9f")) == Err(Truncated)
+expect S2Cap.decode(S2Coder.from_hex("000000000000f03f00000000000000000000000000000000")) == Err(Truncated)
+expect S2Cap.decode([]) == Err(Truncated)
+expect S2Cap.decode(S2Coder.from_hex("000000000000f03f0000000000000000000000000000000028fab8df1c1d9f3f00")) |> Try.is_ok

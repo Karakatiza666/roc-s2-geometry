@@ -9,6 +9,7 @@ import S2LatLngRect
 import S2Loop
 import Internal/S2Boundary
 import S2Point
+import Internal/S2Coder
 
 ## A region bounded by loops, holes included.
 ##
@@ -578,6 +579,82 @@ S2Polygon := { loops : List(Nested), bound : S2LatLngRect, inconsistent_orientat
 
 	to_inspect : S2Polygon -> Str
 	to_inspect = |polygon| "S2Polygon(${polygon.loops.len().to_str()} loops)"
+
+	## The bytes that upstream's `S2Polygon::EncodeUncompressed` writes: the
+	## version byte 1, the byte 1 that stands for the obsolete `owns_loops`
+	## field, a byte that tells whether any loop is a hole, the number of loops
+	## as a little-endian 32-bit integer, each loop in the format of
+	## `S2Loop.encode` with its own depth, and the bounding rectangle in the
+	## format of `S2LatLngRect.encode`. This is the lossless format. The
+	## compressed formats are not written.
+	encode : S2Polygon -> List(U8)
+	encode = |polygon| {
+		has_holes = polygon.loops.any(|entry| entry.depth % 2 == 1)
+		header =
+			[1, 1, if (has_holes) 1 else 0]
+				|> S2Coder.put_u32(polygon.loops.len())
+		polygon.loops.fold(header, |out, entry| out.concat(encode_loop(entry)))
+			|> List.concat(polygon.bound.encode())
+	}
+
+	## The polygon that `encode` writes. Bytes after the polygon are ignored.
+	##
+	## Upstream's `Decode` trusts the stored depths and bound without a check,
+	## and so does this function. A loop with no vertex, and an empty loop,
+	## are dropped, as upstream drops them. The two obsolete bytes are ignored.
+	##
+	## The version byte 4 is upstream's compressed format, which this port
+	## does not read: that is `UnsupportedCompressedEncoding`. Any other
+	## version byte than 1 is `UnsupportedVersion`. More than 10000000 loops is
+	## `TooManyLoops`, which is the default limit of upstream's flag
+	## `s2polygon_decode_max_num_loops`. A loop can give any error of
+	## `S2Loop.decode`.
+	decode : List(U8) -> Try(S2Polygon, [Truncated, UnsupportedVersion(U8), UnsupportedCompressedEncoding, TooManyLoops, TooManyVertices, InvalidRect])
+	decode = |bytes| {
+		version = S2Coder.get_u8(bytes, 0)?
+		if version == 4 {
+			return Err(UnsupportedCompressedEncoding)
+		}
+		if version != 1 {
+			return Err(UnsupportedVersion(version))
+		}
+		if !S2Coder.can_read(bytes, 1, 6) {
+			return Err(Truncated)
+		}
+		count = S2Coder.get_u32(bytes, 3)?
+		if count > 10000000 {
+			return Err(TooManyLoops)
+		}
+		var $loops = []
+		var $pos = 7
+		for _ in 0..<count {
+			rest = bytes.drop_first($pos)
+			boundary = S2Loop.decode(rest)?
+			size = 43 + boundary.num_vertices() * 24
+			depth = S2Coder.get_u32(rest, 6 + boundary.num_vertices() * 24)?
+			if boundary.num_vertices() > 0 and !boundary.is_empty() {
+				$loops = $loops.append({ boundary: boundary, depth: depth })
+			}
+			$pos = $pos + size
+		}
+		bound = S2LatLngRect.decode(bytes.drop_first($pos))?
+		Ok({ loops: $loops, bound: bound, inconsistent_orientations: Bool.False })
+	}
+}
+
+## The encoding of the loop, with its depth in the field for it. The format is
+## that of `S2Loop.encode`.
+encode_loop : S2Polygon.Nested -> List(U8)
+encode_loop = |entry| {
+	boundary = entry.boundary
+	boundary.vertices()
+		.fold(
+			[1] |> S2Coder.put_u32(boundary.num_vertices()),
+			|out, p| out.concat(p.encode()),
+		)
+		|> S2Coder.put_u8(if (boundary.origin_inside) 1 else 0)
+		|> S2Coder.put_u32(entry.depth)
+		|> List.concat(boundary.rect_bound().encode())
 }
 
 ## The edge nearest to `x`, with each loop oriented as `oriented_vertex`
@@ -1221,3 +1298,24 @@ expect {
 		and polygon.num_vertices() == 12
 		and polygon.is_normalized()
 }
+
+# S2Polygon encoding against upstream's `Encode`, and decoding it back.
+expect S2Coder.to_hex(S2Polygon.empty().encode()) == "0101000000000001000000000000f03f0000000000000000182d4454fb210940182d4454fb2109c0"
+expect S2Polygon.decode(S2Coder.from_hex("0101000000000001000000000000f03f0000000000000000182d4454fb210940182d4454fb2109c0")) == Ok(S2Polygon.empty())
+expect S2Coder.to_hex(S2Polygon.full().encode()) == "01010001000000010100000000000000000000000000000000000000000000000000f0bf010000000001182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb21094001182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb210940"
+expect S2Polygon.decode(S2Coder.from_hex("01010001000000010100000000000000000000000000000000000000000000000000f0bf010000000001182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb21094001182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) == Ok(S2Polygon.full())
+expect S2Coder.to_hex(S2Polygon.from_loop(S2Loop.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)])).encode()) == "010100010000000103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb21094001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940"
+expect S2Polygon.decode(S2Coder.from_hex("010100010000000103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb21094001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) == Ok(S2Polygon.from_loop(S2Loop.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)])))
+
+# The compressed format is not read, and any other version is not known.
+expect S2Polygon.decode(S2Coder.from_hex("04000104180000000301171c818c8b83ef3f89730b7e1a3ac63f0000000000000000028d162921fb08ef3ff40b8a74a8e3c53f89730b7e1a3ac63f03171c818c8b83ef3f000000000000000089730b7e1a3ac63f0000")) == Err(UnsupportedCompressedEncoding)
+expect S2Polygon.decode(S2Coder.from_hex("04")) == Err(UnsupportedCompressedEncoding)
+expect S2Polygon.decode(S2Coder.from_hex("020100010000000103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb21094001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) == Err(UnsupportedVersion(2))
+expect S2Polygon.decode(S2Coder.from_hex("000100010000000103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb21094001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) == Err(UnsupportedVersion(0))
+expect S2Polygon.decode([]) == Err(Truncated)
+expect S2Polygon.decode(S2Coder.from_hex("01")) == Err(Truncated)
+expect S2Polygon.decode(S2Coder.from_hex("010100010000000103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb21094001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb2109")) == Err(Truncated)
+expect S2Polygon.decode(S2Coder.from_hex("010100ffffffff")) == Err(TooManyLoops)
+expect S2Polygon.decode(S2Coder.from_hex("010100010000000103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb21094001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940ff")) == S2Polygon.decode(S2Coder.from_hex("010100010000000103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb21094001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940"))
+# The nesting depth is kept, whatever it is.
+expect S2Polygon.decode(S2Coder.from_hex("010100010000000103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f00ffffff7f01000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb21094001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) |> Try.map_ok(|p| p.depth_at(0)) == Ok(2147483647)

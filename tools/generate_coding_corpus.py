@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Heorhii Bulakh
+# SPDX-License-Identifier: UPL-1.0
+"""Generate tests/CodingCorpus.roc: upstream's binary encodings of S2 types.
+
+The oracle (tools/s2_oracle.cc) writes each value with upstream's `Encode`
+method and reads hex back through upstream's `Decode`. This script chooses the
+values, asks the oracle for the bytes, and writes them as Roc data together
+with the numbers they hold, read back out of the bytes so that the Roc side
+builds exactly the value that upstream wrote.
+
+It also asks upstream for a verdict on malformed input: whether `Decode`
+accepts it, and what encoding of the decoded value it then gives. It checks
+that upstream refuses every truncation of one sample of each type.
+
+Usage:
+
+    python3 tools/generate_coding_corpus.py .tmp/oracle14/build/s2_oracle > tests/CodingCorpus.roc
+    roc fmt tests
+"""
+
+import math
+import struct
+import subprocess
+import sys
+
+ORACLE = sys.argv[1]
+
+
+def ask(lines):
+    out = subprocess.run(
+        [ORACLE], input="\n".join(lines) + "\n", capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    assert len(out) == len(lines), (len(out), len(lines))
+    return out
+
+
+def enc(queries):
+    return ask(["code_enc " + q for q in queries])
+
+
+def dec(kind, hexes):
+    return ask([f"code_dec {kind} {h}" for h in hexes])
+
+
+def f(x):
+    s = "%.17g" % x
+    if "e" in s:
+        m, e = s.split("e")
+        if "." not in m:
+            m += ".0"
+        return f"{m}e{int(e)}"
+    return s if "." in s else s + ".0"
+
+
+def doubles(b, n):
+    return list(struct.unpack("<%dd" % n, b[: 8 * n]))
+
+
+def tup(vs):
+    return "(" + ", ".join(f(v) for v in vs) + ")"
+
+
+def u32(b, o):
+    return struct.unpack_from("<I", b, o)[0]
+
+
+def points_list(vs):
+    return "[" + ", ".join(tup(v) for v in vs) + "]"
+
+
+def read_points(b, o, n):
+    return [tuple(doubles(b[o + 24 * i :], 3)) for i in range(n)], o + 24 * n
+
+
+def parse_loop(b, o):
+    assert b[o] == 1
+    n = u32(b, o + 1)
+    pts, o = read_points(b, o + 5, n)
+    o += 1 + 4
+    assert b[o] == 1
+    bound = tuple(doubles(b[o + 1 :], 4))
+    return pts, bound, o + 33
+
+
+# Values -----------------------------------------------------------------
+
+def circle(n, lat, lng, r):
+    return [
+        "L %.4f %.4f"
+        % (lat + r * math.sin(2 * math.pi * i / n), lng + r * math.cos(2 * math.pi * i / n))
+        for i in range(n)
+    ]
+
+
+def chain(items):
+    return f"{len(items)} " + " ".join(items)
+
+
+def level_cells(level, count, face=0, start=0):
+    shift = 2 * (30 - level)
+    return [(face << 61) | ((start + i) << (shift + 1)) | (1 << shift) for i in range(count)]
+
+
+FACE0 = 1 << 60
+SF_LEAF = 0x8085809E8E8D8C61
+POINTS = ["1 0 0", "N 1 2 3", "N -3 4 -12", "-0 0 1", "L 37.7749 -122.4194", "0.6 0.8 0", "2 3 4"]
+LATLNGS = [(0.5, -1.25), (0.0, 0.0), (1.5707963267948966, 3.141592653589793), (10.0, 20.0), (-0.0, 1e-300)]
+CAPS = ["cap 1 0 0 10", "cap N 1 2 3 0", "cap L 37.7749 -122.4194 2", "cap 0 0 1 180", "cap_empty", "cap_full", "cap 1 0 0 90"]
+RECTS = [
+    "rect -0.5 0.5 -1 2",
+    "rect_empty",
+    "rect_full",
+    "rect 0.1 0.2 3.0 -3.0",
+    "rect -1.5707963267948966 0 -3.141592653589793 3.141592653589793",
+    "rect 0.3 0.3 0.7 0.7",
+]
+CELL_IDS = [0, 1, FACE0, 5 << 61 | (1 << 60), SF_LEAF, SF_LEAF >> 40 << 40 | (1 << 39), (1 << 64) - 1, (1 << 63)]
+VALID_CELLS = [FACE0, 5 << 61 | (1 << 60), SF_LEAF, level_cells(12, 1, 2, 12345)[0], level_cells(30, 1, 3, 98765)[0]]
+UNIONS = [
+    [],
+    [FACE0],
+    level_cells(12, 5, 4, 777),
+    level_cells(8, 300, 0, 100),
+    [5 << 61 | (1 << 60), FACE0, FACE0, 0, 5],
+]
+POINT_REGIONS = ["1 0 0", "N 1 2 3", "L 37.7749 -122.4194", "0 0 -1"]
+LOOPS = [
+    "loop_empty",
+    "loop_full",
+    "loop 3 L 0 0 L 0 5 L 5 0",
+    "loop 3 L 0 0 L 5 0 L 0 5",
+    "loop 4 L 80 0 L 80 90 L 80 180 L 80 -90",
+    "loop 4 L -80 0 L -80 -90 L -80 180 L -80 90",
+    "loop 4 L -10 170 L -10 -170 L 10 -170 L 10 170",
+    "loop 3 L 0 0 L 0 0 L 0 5",
+    "loop " + chain(circle(200, 30, 40, 10)),
+]
+LINES = [
+    "line 0",
+    "line 1 L 10 10",
+    "line 2 L 0 0 L 0 5",
+    "line 5 N 1 0 0 N 1 1 0 N 1 1 1 N 0 1 1 N -1 1 -1",
+    "line " + chain(["L %d %d" % (i % 7 * 10 - 30, i * 3 - 150) for i in range(100)]),
+]
+SQUARE = "4 L 0 0 L 0 10 L 10 10 L 10 0"
+POLYS = [
+    "poly_empty",
+    "poly_full",
+    "poly 1 3 L 0 0 L 0 5 L 5 0",
+    "poly 2 " + SQUARE + " 4 L 2 2 L 2 8 L 8 8 L 8 2",
+    "poly 3 " + SQUARE + " 4 L 2 2 L 2 8 L 8 8 L 8 2 4 L 4 4 L 4 6 L 6 6 L 6 4",
+    "poly 2 3 L 0 0 L 0 5 L 5 0 3 L 20 20 L 20 25 L 25 20",
+    "poly 1 4 L 80 0 L 80 90 L 80 180 L 80 -90",
+    "poly 1 3 L 0 0 L 5 0 L 0 5",
+    "poly 2 " + chain(circle(50, 0, 0, 20)) + " " + chain(circle(30, 0, 0, 8)),
+]
+
+
+def main():
+    out = []
+    w = out.append
+    w("## Upstream's binary encodings of S2 types, and its verdicts on malformed input.")
+    w("##")
+    w("## Generated by `tools/generate_coding_corpus.py` from upstream's `Encode` and")
+    w("## `Decode`. Do not edit by hand.")
+    w("##")
+    w("## Internal to this package.")
+    w("CodingCorpus := [].{")
+    w("")
+
+    def section(name, doc, typ, rows):
+        w(f"\t## {doc}")
+        w(f"\t{name} : List({typ})")
+        w(f"\t{name} = [")
+        for r in rows:
+            w(f"\t\t{r},")
+        w("\t]")
+        w("")
+
+    xyz = "(F64, F64, F64)"
+    hexes = {}
+
+    hs = enc([f"point {p}" for p in POINTS])
+    hexes["point"] = hs
+    section("points", "A point: 24 bytes.", f"{{ hex : Str, xyz : {xyz} }}",
+            [f'{{ hex: "{h}", xyz: {tup(doubles(bytes.fromhex(h), 3))} }}' for h in hs])
+
+    hs = enc([f"latlng {a} {b}" for a, b in LATLNGS])
+    hexes["latlng"] = hs
+    section("latlngs", "A position in radians: 16 bytes.", "{ hex : Str, lat : F64, lng : F64 }",
+            [f'{{ hex: "{h}", lat: {f(doubles(bytes.fromhex(h), 2)[0])}, lng: {f(doubles(bytes.fromhex(h), 2)[1])} }}' for h in hs])
+
+    hs = enc(CAPS)
+    hexes["cap"] = hs
+    section("caps", "A cap: a centre and a squared chord length, 32 bytes.", f"{{ hex : Str, center : {xyz}, length2 : F64 }}",
+            [f'{{ hex: "{h}", center: {tup(doubles(bytes.fromhex(h), 4)[:3])}, length2: {f(doubles(bytes.fromhex(h), 4)[3])} }}' for h in hs])
+
+    hs = enc(RECTS)
+    hexes["rect"] = hs
+    section("rects", "A rectangle: the version byte and four bounds, 33 bytes.",
+            "{ hex : Str, lat_lo : F64, lat_hi : F64, lng_lo : F64, lng_hi : F64 }",
+            [
+                '{ hex: "%s", lat_lo: %s, lat_hi: %s, lng_lo: %s, lng_hi: %s }'
+                % ((h,) + tuple(f(v) for v in doubles(bytes.fromhex(h)[1:], 4)))
+                for h in hs
+            ])
+
+    hs = enc([f"cellid {i}" for i in CELL_IDS])
+    hexes["cellid"] = hs
+    section("cell_ids", "A cell id, valid or not: 8 bytes.", "{ hex : Str, id : U64 }",
+            [f'{{ hex: "{h}", id: {i} }}' for h, i in zip(hs, CELL_IDS)])
+
+    hs = enc([f"cell {i}" for i in VALID_CELLS])
+    hexes["cell"] = hs
+    section("cells", "A cell: the id of a valid cell, 8 bytes.", "{ hex : Str, id : U64 }",
+            [f'{{ hex: "{h}", id: {i} }}' for h, i in zip(hs, VALID_CELLS)])
+
+    hs = enc([f"union {len(u)} " + " ".join(map(str, u)) for u in UNIONS])
+    hexes["union"] = hs
+    section("unions", "A cell union as written, normalized or not.", "{ hex : Str, ids : List(U64) }",
+            [f'{{ hex: "{h}", ids: [{", ".join(map(str, u))}] }}' for h, u in zip(hs, UNIONS)])
+
+    hs = enc([f"pointregion {p}" for p in POINT_REGIONS])
+    hexes["pointregion"] = hs
+    section("point_regions", "A point region: the version byte and a point, 25 bytes.", f"{{ hex : Str, xyz : {xyz} }}",
+            [f'{{ hex: "{h}", xyz: {tup(doubles(bytes.fromhex(h)[1:], 3))} }}' for h in hs])
+
+    hs = enc(LOOPS)
+    hexes["loop"] = hs
+    rows = []
+    for h in hs:
+        pts, bound, _ = parse_loop(bytes.fromhex(h), 0)
+        rows.append(f'{{ hex: "{h}", vertices: {points_list(pts)}, bound: {tup(bound)} }}')
+    section("loops", "A loop of depth 0, with its vertices and its bound.",
+            f"{{ hex : Str, vertices : List({xyz}), bound : (F64, F64, F64, F64) }}", rows)
+
+    hs = enc(LINES)
+    hexes["line"] = hs
+    rows = []
+    for h in hs:
+        b = bytes.fromhex(h)
+        pts, _ = read_points(b, 5, u32(b, 1))
+        rows.append(f'{{ hex: "{h}", vertices: {points_list(pts)} }}')
+    section("lines", "A polyline in the lossless format.", f"{{ hex : Str, vertices : List({xyz}) }}", rows)
+
+    hs = enc(POLYS)
+    hexes["poly"] = hs
+    rows = []
+    for h in hs:
+        b = bytes.fromhex(h)
+        n = u32(b, 3)
+        o = 7
+        loops = []
+        for _ in range(n):
+            pts, bound, o = parse_loop(b, o)
+            loops.append(f"{{ vertices: {points_list(pts)}, bound: {tup(bound)} }}")
+        rows.append(f'{{ hex: "{h}", loops: [{", ".join(loops)}] }}')
+    section("polygons", "A polygon in the lossless format, with the vertices and the bound of each loop.",
+            f"{{ hex : Str, loops : List({{ vertices : List({xyz}), bound : (F64, F64, F64, F64) }}) }}", rows)
+
+    # Verdicts on bytes that are not a plain encoding.
+    cases = []  # (kind, name, hex)
+
+    def add(kind, name, h):
+        cases.append((kind, name, h))
+
+    def mutate(h, offset, byte):
+        b = bytearray(bytes.fromhex(h))
+        b[offset] = byte
+        return b.hex()
+
+    samples = {
+        "point": hexes["point"][1], "latlng": hexes["latlng"][0], "cap": hexes["cap"][2],
+        "rect": hexes["rect"][0], "cellid": hexes["cellid"][4], "cell": hexes["cell"][2],
+        "union": hexes["union"][2], "pointregion": hexes["pointregion"][1],
+        "loop": hexes["loop"][2], "line": hexes["line"][3], "poly": hexes["poly"][4],
+    }
+    for kind in ("rect", "union", "pointregion", "loop", "line", "poly"):
+        for v in (0, 2, 3, 4, 5, 255):
+            add(kind, f"version {v}", mutate(samples[kind], 0, v))
+    for kind in ("point", "latlng", "cap", "cellid", "cell"):
+        add(kind, "trailing bytes", samples[kind] + "deadbeef")
+    for kind in ("rect", "union", "pointregion", "loop", "line", "poly"):
+        add(kind, "trailing bytes", samples[kind] + "deadbeef")
+    # Fields upstream does not check.
+    nl = u32(bytes.fromhex(samples["loop"]), 1)
+    add("loop", "origin_inside byte 2", mutate(samples["loop"], 5 + 24 * nl, 2))
+    tp = enc(["poly 1 3 L 0 0 L 0 5 L 5 0"])[0]
+    add("poly", "huge depth", tp[: 2 * (7 + 6 + 24 * 3)] + "ffffff7f" + tp[2 * (7 + 10 + 24 * 3):])
+    zero_loop = "01" + "00000000" + "00" + "00000000" + enc(["rect_empty"])[0]
+    add("loop", "zero vertices", zero_loop)
+    add("loop", "count too large", "01ffffffff" + "00" * 40)
+    add("loop", "count 50000001", "0181f0fa02" + "00" * 40)
+    add("union", "count too large", "01" + "ffffffffffffffff" + "00" * 16)
+    add("union", "count 1000001", "01" + "41420f0000000000" + "00" * 16)
+    add("union", "count 2 with 1 cell", "01" + "0200000000000000" + "00" * 8)
+    add("union", "count 0", "01" + "0000000000000000")
+    add("poly", "count too large", "010100ffffffff")
+    add("poly", "count 10000001", "01010081969800")
+    add("line", "count too large", "01ffffffff")
+    for r in ("rect 2 3 0 1", "rect 1 0 0 1", "rect 0 1 0 4", "rect -0.5 0.5 -3.141592653589793 1"):
+        add("rect", r, enc([r])[0])
+    add("pointregion", "not unit length", enc(["pointregion 2 3 4"])[0])
+    add("pointregion", "zero", enc(["pointregion 0 0 0"])[0])
+    add("cell", "invalid id 0", hexes["cellid"][0])
+    add("cell", "invalid id 1", hexes["cellid"][1])
+    add("cell", "sentinel", hexes["cellid"][6])
+    # A polygon holding an empty loop and a loop with no vertex: upstream drops both.
+    tri = enc(["loop 3 L 0 0 L 0 5 L 5 0"])[0]
+    tri_poly = enc(["poly 1 3 L 0 0 L 0 5 L 5 0"])[0]
+    bound = tri_poly[-66:]
+    for name, loops in (
+        ("empty loop dropped", [tri, enc(["loop_empty"])[0]]),
+        ("empty loop first", [enc(["loop_empty"])[0], tri]),
+        ("zero vertex loop dropped", [zero_loop, tri]),
+        ("full loop kept", [enc(["loop_full"])[0]]),
+        ("only empty loops", [enc(["loop_empty"])[0], enc(["loop_empty"])[0]]),
+    ):
+        n = "%08x" % len(loops)
+        n = bytes.fromhex(n)[::-1].hex()
+        add("poly", name, "010100" + n + "".join(loops) + bound)
+    # Compressed forms.
+    snap = ["N " + ask([f"cell_point_raw {c}"])[0] for c in level_cells(10, 4, 1, 3)]
+    snap_chain = "4 " + " ".join(snap)
+    for name, q in (("compact snapped chain", f"line_compact {snap_chain}"), ("compact empty", "line_compact 0")):
+        add("line", name, enc([q])[0])
+    for name, q in (
+        ("compact snapped loop", f"poly_compact 1 {snap_chain}"),
+        ("compact square", "poly_compact 1 4 L 0 0 L 0 10 L 10 10 L 10 0"),
+        ("compact empty", "poly_compact poly_empty"),
+    ):
+        add("poly", name, enc([q])[0])
+
+    verdicts = []
+    for kind in ("point", "latlng", "cap", "rect", "cellid", "cell", "union", "pointregion", "loop", "line", "poly"):
+        group = [c for c in cases if c[0] == kind]
+        results = dec(kind, [c[2] for c in group])
+        for (k, name, h), r in zip(group, results):
+            if r == "err":
+                verdict = "-"
+            elif r == "invalid":
+                verdict = "invalid"
+            else:
+                assert r.startswith("ok "), r
+                verdict = r[3:]
+                if kind == "line" and h.startswith("02"):
+                    verdict = "compressed"
+                if kind == "poly" and h.startswith("04"):
+                    verdict = "compressed"
+            verdicts.append((k, name, h, verdict))
+    rows = [f'{{ kind: "{k}", name: "{n}", hex: "{h}", verdict: "{v}" }}' for k, n, h, v in verdicts]
+    section(
+        "verdicts",
+        "Bytes that are not a plain encoding, and what upstream makes of them. The verdict is `-` when\n"
+        "\t## `Decode` refuses them, `compressed` when they are in a compressed format that this port does not\n"
+        "\t## read, `invalid` for a cell with an invalid id that upstream would build without meaning, and\n"
+        "\t## otherwise the hex of what `Encode` gives for the value that `Decode` read.",
+        "{ kind : Str, name : Str, hex : Str, verdict : Str }",
+        rows,
+    )
+
+    # Every truncation of one sample of each kind is refused.
+    for kind, h in samples.items():
+        prefixes = [h[:i] or "-" for i in range(0, len(h), 2)]
+        for r, p in zip(dec(kind, prefixes), prefixes):
+            assert r == "err", (kind, p, r)
+    w("\t## The sample of each kind whose truncations are all refused. Upstream refuses them too.")
+    w("\ttruncation_samples : List({ kind : Str, hex : Str })")
+    w("\ttruncation_samples = [")
+    for kind, h in samples.items():
+        w(f'\t\t{{ kind: "{kind}", hex: "{h}" }},')
+    w("\t]")
+    w("}")
+    print("\n".join(out))
+
+
+main()
