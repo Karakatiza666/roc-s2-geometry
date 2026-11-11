@@ -13,7 +13,7 @@ range query that an ordinary database index can answer.
 
 ```roc
 app [main!] {
-    s2: "https://github.com/Karakatiza666/roc-s2-geometry/releases/download/<version>/<hash>.tar.zst",
+    s2: "https://github.com/Karakatiza666/roc-s2-geometry/releases/download/0.0.1/AiE9V4gw3PVhB1Y9j33CZ733U5wNyV6TDUUQ3ALXjmhi.tar.zst",
 }
 
 import s2.S2Cap
