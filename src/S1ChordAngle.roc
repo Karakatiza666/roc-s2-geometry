@@ -142,6 +142,14 @@ S1ChordAngle := { length2 : F64 }.{
 		{ length2: (x + y + 2.0 * (x * y).sqrt()).min(4.0) }
 	}
 
+	## The most relative error in the `length2` of a sum from `plus`, about
+	## 2.02 times `F64` machine epsilon.
+	##
+	## A caller that must contain the true sum adds this much of `length2`
+	## with `plus_error`.
+	relative_sum_error : F64
+	relative_sum_error = 2.02 * 2.220446049250313e-16
+
 	## The difference of two angles, clamped to zero.
 	minus : S1ChordAngle, S1ChordAngle -> S1ChordAngle
 	minus = |a, b| {

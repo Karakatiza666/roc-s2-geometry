@@ -36,13 +36,14 @@ S2Metric := { deriv : F64, dim : U8 }.{
 	value_at = |m, level| S2Math.ldexp(m.deriv, -(m.dim.to_i32() * level.to_i32_wrap()))
 
 	## The coarsest level at which the metric is still at most `value`, or
-	## level 30 when no level is fine enough.
+	## level 30 when no level is fine enough. A `value` that is not positive,
+	## NaN included, gives level 30.
 	##
 	## `max_diag.min_level_for(0.1)` is the coarsest cells whose diagonals are
 	## all 0.1 or shorter.
 	min_level_for : S2Metric, F64 -> U64
 	min_level_for = |m, value| {
-		if value <= 0.0 {
+		if !(value > 0.0) {
 			return S2CellId.max_level
 		}
 		exponent = S2Math.frexp_exponent(value / m.deriv)
@@ -52,10 +53,11 @@ S2Metric := { deriv : F64, dim : U8 }.{
 	}
 
 	## The finest level at which the metric is still at least `value`, or
-	## level 0 when no level is coarse enough.
+	## level 0 when no level is coarse enough. A `value` that is not positive,
+	## NaN included, gives level 30.
 	max_level_for : S2Metric, F64 -> U64
 	max_level_for = |m, value| {
-		if value <= 0.0 {
+		if !(value > 0.0) {
 			return S2CellId.max_level
 		}
 		exponent = S2Math.frexp_exponent(m.deriv / value)
@@ -188,3 +190,5 @@ expect {
 		and (level == 0 or S2Metric.max_diag.value_at(level - 1) > target)
 }
 expect S2Metric.avg_edge.closest_level_for(S2Metric.avg_edge.value_at(12)) == 12
+expect S2Metric.min_width.min_level_for(F64.nan) == S2CellId.max_level
+expect S2Metric.min_width.max_level_for(F64.nan) == S2CellId.max_level

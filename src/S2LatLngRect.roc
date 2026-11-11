@@ -405,7 +405,8 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 	## The bounding cap of the rectangle.
 	##
 	## Picks whichever is smaller: a cap centred on the nearer pole, or one
-	## centred on the rectangle's own centre.
+	## centred on the rectangle's own centre. A rectangle wider than 180
+	## degrees of longitude always gets the pole cap.
 	cap_bound : S2LatLngRect -> S2Cap
 	cap_bound = |r| {
 		if r.is_empty() {
@@ -422,8 +423,9 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 			S1Angle.from_radians((1.0 + 2.0 * 2.220446049250313e-16) * pole_angle),
 		)
 
-		lng_span = r.lng.hi() - r.lng.lo()
-		if S2Math.remainder(lng_span, 2.0 * F64.pi) >= 0.0 and lng_span < 2.0 * F64.pi {
+		# Up to 180 degrees of longitude, the cap is largest at one of the
+		# vertices. A wider rectangle always gets the pole cap.
+		if r.lng.length() <= F64.pi {
 			var $mid_cap = S2Cap.from_point(r.center().to_point())
 			for k in (0.U64).until(4) {
 				$mid_cap = $mid_cap.add_point(r.vertex(k).to_point())
@@ -637,6 +639,13 @@ expect {
 	failures == 0
 }
 expect S2LatLngRect.empty().cap_bound().is_empty()
+expect {
+	# A rectangle 190 degrees wide. The cap around its centre has a radius of
+	# about 94.9 degrees and the pole cap one of 100 degrees, but a rectangle
+	# wider than 180 degrees always gets the pole cap.
+	r = S2LatLngRect.from_bounds(S2LatLng.from_degrees(-10.0, -95.0), S2LatLng.from_degrees(10.0, 95.0))
+	r.cap_bound().center() == S2Point.new(0.0, 0.0, 1.0)
+}
 expect {
 	# The pole cap is padded, so its radius exceeds the exact polar distance.
 	r = S2LatLngRect.new(R1Interval.new(0.5, 1.0), S1Interval.full())

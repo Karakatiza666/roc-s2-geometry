@@ -234,6 +234,10 @@ expect S2Coords.st_to_ij(0.0) == 0
 expect S2Coords.st_to_ij(1.0) == S2Coords.max_size - 1
 expect S2Coords.st_to_ij(0.5) == S2Coords.max_size / 2
 expect S2Coords.st_to_ij(-1.0) == 0
+# Upstream truncates `s * max_size`, so the left edge of leaf 3 is in leaf
+# 3, and a NaN gives leaf 0.
+expect S2Coords.st_to_ij(3.0 / S2Coords.max_size.to_f64()) == 3
+expect S2Coords.st_to_ij(F64.nan) == 0
 expect S2Coords.si_ti_to_st(2 * S2Coords.max_size) == 1.0
 expect S2Coords.st_to_si_ti(1.0) == 2 * S2Coords.max_size
 expect S2Coords.face_of(S2Point.new(1.0, 0.0, 0.0)) == 0

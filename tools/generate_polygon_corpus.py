@@ -15,7 +15,7 @@ relation table out of that file and emits them as Roc data. The Roc side
 
 Usage:
 
-    curl -sSLO https://raw.githubusercontent.com/google/s2geometry/v0.11.1/src/s2/s2polygon_test.cc
+    curl -sSLO https://raw.githubusercontent.com/google/s2geometry/v0.14.0/src/s2/s2polygon_test.cc
     python3 tools/generate_polygon_corpus.py s2polygon_test.cc
     roc fmt .
 """

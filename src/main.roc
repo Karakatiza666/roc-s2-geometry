@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Heorhii Bulakh
 # SPDX-License-Identifier: UPL-1.0
 #
-# A port of the S2 Geometry Library (google/s2geometry v0.11.1). The parts that
+# A port of the S2 Geometry Library (google/s2geometry v0.14.0). The parts that
 # come from upstream are also available under the Apache License, Version 2.0,
 # https://www.apache.org/licenses/LICENSE-2.0. Upstream's notice:
 #

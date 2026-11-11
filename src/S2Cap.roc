@@ -193,8 +193,10 @@ S2Cap := { center : S2Point, radius : S1ChordAngle }.{
 			return cap
 		}
 		dist = S1ChordAngle.from_points(cap.center, other.center) + other.radius
-		# Round the radius up so that the result really does contain `other`.
-		rounded = dist.plus_error(2.220446049250313e-16 * dist.length2())
+		# Round the radius up so that the result really does contain `other`:
+		# two units of rounding error for the distance, and the error of the
+		# sum.
+		rounded = dist.plus_error((2.0 * 2.220446049250313e-16 + S1ChordAngle.relative_sum_error) * dist.length2())
 		{ center: cap.center, radius: cap.radius.max(rounded) }
 	}
 
@@ -446,6 +448,13 @@ expect {
 }
 expect S2Cap.from_center_angle(S2Point.new(1.0, 0.0, 0.0), S1Angle.from_degrees(10.0)).cap_bound()
 	== S2Cap.from_center_angle(S2Point.new(1.0, 0.0, 0.0), S1Angle.from_degrees(10.0))
+expect {
+	# The sum of the distance and the radius gets a relative padding of
+	# 2 + 2.02 machine epsilons: 2 * (1 + 4.02 * 2^-52) rounds to 2 + 2^-49.
+	c = S2Point.new(1.0, 0.0, 0.0)
+	merged = S2Cap.from_point(c).add_cap(S2Cap.from_center_chord_angle(c, S1ChordAngle.right()))
+	merged.radius().length2() == 2.0000000000000018
+}
 
 ## True when the cap meets the cell somewhere other than at a cell vertex.
 ##

@@ -243,10 +243,11 @@ initial_candidates = |coverer, probe, interior| {
 
 ## A few cells that together cover a cap, upstream's `S2Cap::GetCellUnionBound`.
 ##
-## Upstream bounds every region except `S2Cap` and `S2Polygon` by the cells
-## that cover its cap bound, so this is the bound of all of them but
+## Upstream bounds every region except `S2Cap`, `S2Cell` and `S2Polygon` by
+## the cells that cover its cap bound, so this is the bound of all of them but
 ## `S2Polygon`. Upstream bounds a polygon by the cells of its spatial index,
-## which this port does not have.
+## which this port does not have, and a cell by the cell itself. A cell is not
+## a region in this port.
 ##
 ## The cells are the four at the finest level at which the cap contains at
 ## most one cell vertex, around the vertex nearest the centre. A cap too large
@@ -834,7 +835,7 @@ expect {
 }
 expect {
 	# The expected cells in this and the next five tests come from upstream's
-	# C++ S2RegionCoverer at v0.11.1, through tools/cover_oracle.cc, with the
+	# C++ S2RegionCoverer at v0.14.0, through tools/cover_oracle.cc, with the
 	# input line given in each comment. Here: capll 10 20 5 12 0 30 1.
 	cap = S2Cap.from_center_angle(
 		S2LatLng.from_degrees(10.0, 20.0).to_point(),

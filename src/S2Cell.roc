@@ -212,13 +212,13 @@ S2Cell := { id : S2CellId, face : U64, level : U64, orientation : U64, uv : R2Re
 
 	## True when the point lies inside the cell or on its boundary.
 	##
-	## The `(u, v)` bound grows by `F64` machine epsilon, which is the most
-	## error that the conversion to `(s, t)` can add. So the cell of a point
-	## always contains that point.
+	## The `(u, v)` bound grows by 5/3 of `F64` machine epsilon, which is more
+	## than the error that the conversion to `(s, t)` and back can add. So the
+	## cell of a point always contains that point.
 	contains_point : S2Cell, S2Point -> Bool
 	contains_point = |cell, p|
 		match S2Coords.face_xyz_to_uv(cell.face, p) {
-			Ok(uv) => cell.uv.expanded_by(2.220446049250313e-16).contains_point(uv)
+			Ok(uv) => cell.uv.expanded_by((5.0 / 3.0) * 2.220446049250313e-16).contains_point(uv)
 			Err(NotOnFace) => Bool.False
 		}
 
@@ -406,4 +406,12 @@ expect {
 	hi = cell.bound_uv().x().hi()
 	p = S2Coords.face_uv_to_xyz(0, hi + 1.5e-16, cell.bound_uv().y().lo() + 0.001)
 	cell.contains_point(p)
+}
+expect {
+	# The bound grows by 5/3 of machine epsilon, so on face 0 the upper u bound
+	# 1 rounds up to 1 + 2^-51. A point at u = 1 + 2^-51 is inside, and one at
+	# u = 1 + 3 * 2^-52 is outside.
+	cell = S2Cell.from_face(0)
+	cell.contains_point(S2Point.new(1.0, 1.0000000000000004, 0.0))
+		and !cell.contains_point(S2Point.new(1.0, 1.0000000000000007, 0.0))
 }

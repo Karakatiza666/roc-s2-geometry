@@ -44,7 +44,7 @@ S2Polygon := { loops : List(Nested), bound : S2LatLngRect, inconsistent_orientat
 	## direction as its shell. When the direction of the input is not known,
 	## `normalized` on each loop gives loops that nest, or use
 	## `from_oriented_loops`. The loops may come in any order. This is
-	## upstream's `InitNested`, except that empty loops are dropped here.
+	## upstream's `InitNested`, which also drops empty loops.
 	##
 	## The nesting is found with `S2Loop.contains_nested`, which assumes
 	## nested input. `is_valid` checks it.
@@ -134,8 +134,10 @@ S2Polygon := { loops : List(Nested), bound : S2LatLngRect, inconsistent_orientat
 
 	## The first reason the polygon is not well formed, if there is one.
 	##
-	## These are the checks of upstream's `FindValidationError`, in its order.
-	## Loop numbers are positions in `loops`.
+	## These are the checks of upstream's `FindValidationError` at v0.11.1, in
+	## its order. Upstream v0.14.0 checks the loop depths first and then
+	## validates its spatial index, so for an invalid polygon it can report a
+	## different first error. Loop numbers are positions in `loops`.
 	##
 	## - `InvalidLoop`: the loop fails `S2Loop.is_valid`.
 	## - `EmptyLoop`: the loop is the empty loop.

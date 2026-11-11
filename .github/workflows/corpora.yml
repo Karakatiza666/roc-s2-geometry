@@ -37,7 +37,7 @@ jobs:
     env:
       # The s2sphere revision in UPSTREAM. Its master has not changed since.
       S2SPHERE: d1d067e8c06e5fbaf0cc0158bade947b4a03a438
-      S2GEOMETRY: v0.11.1
+      S2GEOMETRY: v0.14.0
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

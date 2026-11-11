@@ -6,7 +6,7 @@ import s2.S2RegionCoverer
 import CoverCorpus
 
 ## Checks `S2RegionCoverer` against coverings from upstream's C++
-## S2RegionCoverer at v0.11.1, generated through `tools/cover_oracle.cc`.
+## S2RegionCoverer at v0.14.0, generated through `tools/cover_oracle.cc`.
 ##
 ## The comparison is cell for cell and in order, so it pins down the
 ## refinement order and the tie-breaking as well as the final set.

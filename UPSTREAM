@@ -7,7 +7,7 @@
 
 s2geometry
   https://github.com/google/s2geometry
-  tag        v0.11.1
+  tag        v0.14.0
   license    Apache-2.0
   role       the reference implementation. Every algorithm, constant and error
              bound in the port comes from here: the quadratic projection and
@@ -24,7 +24,7 @@ s2geometry
              tests/CoverCorpus.roc and the expected coverings in
              src/S2RegionCoverer.roc come from running upstream's C++
              S2RegionCoverer at this tag. tools/cover_oracle.cc is the driver,
-             linked against s2geometry v0.11.1 and abseil-cpp 20230802.1, and
+             linked against s2geometry v0.14.0 and abseil-cpp 20250814.1, and
              tools/generate_corpus.py runs it. The corpus was generated with
              libc++, whose priority queue decides the order of candidates
              with equal priority.

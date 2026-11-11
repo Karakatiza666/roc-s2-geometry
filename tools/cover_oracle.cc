@@ -4,7 +4,7 @@
 // Prints the coverings that upstream's S2RegionCoverer gives for a list of
 // regions. tools/generate_corpus.py runs it to write tests/CoverCorpus.roc.
 //
-// Build it against google/s2geometry v0.11.1 and the abseil it was built
+// Build it against google/s2geometry v0.14.0 and the abseil it was built
 // with, then give it the cases on standard input, one per line:
 //
 //   cap X Y Z DEGREES                 MAX_CELLS MIN_LEVEL MAX_LEVEL LEVEL_MOD

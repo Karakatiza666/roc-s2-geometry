@@ -196,7 +196,7 @@ and from upstream's test files, and fails if they differ from the committed
 ones. It does not regenerate `CoverCorpus`, because its oracle needs a C++
 build of upstream.
 
-There are 766 assertions. `roc test src/main.roc` runs the 655 unit tests
+There are 777 assertions. `roc test src/main.roc` runs the 666 unit tests
 written alongside the modules they cover. `roc test tests/main.roc` runs the
 111 corpus sweeps, each of which walks every case in one golden corpus. It
 also runs the unit tests of every module the sweeps import, but not of a module
@@ -206,7 +206,7 @@ The corpora are what make this more than a self-consistency check. Four of them
 come from running [s2sphere](https://github.com/sidewalklabs/s2sphere), an
 independent Python port of the same C++ library, so the expected values come
 from a third implementation rather than from this one. `CoverCorpus` comes from
-upstream's own C++ `S2RegionCoverer` at v0.11.1. s2sphere ports an older
+upstream's own C++ `S2RegionCoverer` at v0.14.0. s2sphere ports an older
 version of that algorithm, which gives different coverings. Two are the tables
 out of upstream's own test suite, which is the reference answer for the
 containment predicates and is full of the degenerate cases those predicates get
@@ -242,8 +242,8 @@ To regenerate:
 pip install s2sphere
 python3 tools/generate_corpus.py --cover-oracle path/to/cover_oracle
 
-curl -sSLO https://raw.githubusercontent.com/google/s2geometry/v0.11.1/src/s2/s2loop_test.cc
-curl -sSLO https://raw.githubusercontent.com/google/s2geometry/v0.11.1/src/s2/s2polygon_test.cc
+curl -sSLO https://raw.githubusercontent.com/google/s2geometry/v0.14.0/src/s2/s2loop_test.cc
+curl -sSLO https://raw.githubusercontent.com/google/s2geometry/v0.14.0/src/s2/s2polygon_test.cc
 python3 tools/generate_loop_corpus.py s2loop_test.cc
 python3 tools/generate_polygon_corpus.py s2polygon_test.cc
 
@@ -251,7 +251,7 @@ roc fmt tests
 ```
 
 `cover_oracle` is `tools/cover_oracle.cc` compiled and linked against
-s2geometry v0.11.1 and the abseil-cpp it builds with (20230802.1 works). The
+s2geometry v0.14.0 and the abseil-cpp it builds with (20250814.1 works). The
 generator gives it the cases and reads back the coverings. Without
 `--cover-oracle`, the generator does not write `CoverCorpus`. With
 `--only cover`, it writes only `CoverCorpus` and does not need s2sphere.
@@ -289,7 +289,7 @@ and a reference to the UPL.
 
 No upstream source file is copied here. But this is a port: the algorithms,
 the constants, the lookup tables and the shape of the API follow
-[google/s2geometry](https://github.com/google/s2geometry) at tag v0.11.1,
+[google/s2geometry](https://github.com/google/s2geometry) at tag v0.14.0,
 which is Apache-2.0. Apache-2.0 lets a changed work carry a licence of its
 own, if it keeps upstream's notices. `NOTICE` keeps them, and
 `src/main.roc` repeats them so that every release bundle carries them.

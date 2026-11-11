@@ -95,11 +95,19 @@ S2LatLng := { lat : F64, lng : F64 }.{
 	is_valid = |ll| ll.lat.abs() <= 0.5 * F64.pi and ll.lng.abs() <= F64.pi
 
 	## Latitude clamped to the poles and longitude wrapped into `[-pi, pi]`.
+	##
+	## A position with an infinite or NaN coordinate stays invalid: the result
+	## is `invalid`.
 	normalized : S2LatLng -> S2LatLng
-	normalized = |ll| {
-		lat: S2Math.clamp(ll.lat, -0.5 * F64.pi, 0.5 * F64.pi),
-		lng: S2Math.remainder(ll.lng, 2.0 * F64.pi),
-	}
+	normalized = |ll|
+		if !ll.lat.is_finite() or !ll.lng.is_finite() {
+			S2LatLng.invalid()
+		} else {
+			{
+				lat: S2Math.clamp(ll.lat, -0.5 * F64.pi, 0.5 * F64.pi),
+				lng: S2Math.remainder(ll.lng, 2.0 * F64.pi),
+			}
+		}
 
 	## The corresponding unit vector. Requires a valid position.
 	to_point : S2LatLng -> S2Point
@@ -158,6 +166,8 @@ expect !S2LatLng.invalid().is_valid()
 expect !S2LatLng.from_degrees(91.0, 0.0).is_valid()
 expect S2LatLng.from_degrees(91.0, 0.0).normalized().lat_degrees() == 90.0
 expect (S2LatLng.from_degrees(0.0, 270.0).normalized().lng_degrees() - -90.0).abs() < 1e-13
+expect !S2LatLng.from_radians(F64.infinity, 0.0).normalized().is_valid()
+expect S2LatLng.from_radians(0.0, -F64.infinity).normalized() == S2LatLng.invalid()
 expect S2LatLng.from_degrees(0.0, 0.0).to_point().approx_eq(S2Point.new(1.0, 0.0, 0.0), 1e-15)
 expect S2LatLng.from_degrees(90.0, 0.0).to_point().approx_eq(S2Point.new(0.0, 0.0, 1.0), 1e-15)
 expect S2LatLng.from_degrees(0.0, 90.0).to_point().approx_eq(S2Point.new(0.0, 1.0, 0.0), 1e-15)
