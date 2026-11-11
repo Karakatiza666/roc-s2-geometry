@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: 2005 Google Inc. and subsequent S2 Geometry authors, 2026 George Bulakh
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Heorhii Bulakh
+# SPDX-License-Identifier: UPL-1.0
 
 # Runs the examples against a bundle: a .tar.zst file (default dist/*.tar.zst)
 # served on localhost, or a release URL. A path is from the repo root.

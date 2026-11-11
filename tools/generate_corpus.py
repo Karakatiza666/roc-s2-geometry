@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Heorhii Bulakh
+# SPDX-License-Identifier: UPL-1.0
 """Generate this package's golden test corpora.
 
 The expected values come from s2sphere, an independent Python port of the same

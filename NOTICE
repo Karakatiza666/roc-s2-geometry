@@ -1,0 +1,24 @@
+roc-s2-geometry
+Copyright (c) 2026 Heorhii Bulakh
+Licensed under the Universal Permissive License, Version 1.0 (see LICENSE).
+
+This is a port to Roc of the S2 Geometry Library, written against
+google/s2geometry at tag v0.11.1. No upstream source file is copied, but the
+algorithms, constants, lookup tables, error bounds and the shape of the API
+follow upstream, and every Roc module is a changed form of its counterpart
+there. The parts that come from upstream remain available under the Apache
+License, Version 2.0 (see LICENSES/Apache-2.0.txt). Upstream's NOTICE reads:
+
+    S2 Geometry Library
+    Copyright 2017 Google Inc.  All Rights Reserved.
+
+    This product includes software developed at
+    Google (https://www.google.com/).
+
+Two test corpora carry data extracted from upstream's test suite and are
+licensed under Apache-2.0 only:
+
+    tests/LoopRelationCorpus.roc   from src/s2/s2loop_test.cc
+    tests/PolygonCorpus.roc        from src/s2/s2polygon_test.cc
+
+They are not part of the released package.
