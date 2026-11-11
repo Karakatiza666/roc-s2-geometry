@@ -1,5 +1,6 @@
 import R1Interval
 import S1Angle
+import S1ChordAngle
 import S1Interval
 import S2Cap
 import S2Cell
@@ -326,7 +327,7 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 	##
 	## Latitude is clamped at the poles while longitude wraps. To grow by a
 	## distance on the sphere rather than by coordinate ranges, use
-	## `convolve_with_cap`.
+	## `expanded_by_distance`.
 	expanded : S2LatLngRect, S2LatLng -> S2LatLngRect
 	expanded = |r, margin| {
 		new_lat = r.lat.expanded(margin.lat_radians())
@@ -358,13 +359,15 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 	## The result is empty when nothing is left. A rectangle with a full
 	## longitude interval keeps the pole it touches, as that pole has no
 	## boundary.
-	convolve_with_cap : S2LatLngRect, S1Angle -> S2LatLngRect
-	convolve_with_cap = |r, angle| {
+	expanded_by_distance : S2LatLngRect, S1Angle -> S2LatLngRect
+	expanded_by_distance = |r, angle| {
 		if angle.radians() >= 0.0 {
-			cap = S2Cap.from_center_angle(S2Point.new(1.0, 0.0, 0.0), angle)
+			# The union of the bounds of a cap around each vertex, and of the
+			# rectangle itself, which matters for very large rectangles.
+			radius = S1ChordAngle.from_angle(angle)
 			var $out = r
 			for k in (0.U64).until(4) {
-				vertex_cap = S2Cap.from_center_chord_angle(r.vertex(k).to_point(), cap.radius())
+				vertex_cap = S2Cap.from_center_chord_angle(r.vertex(k).to_point(), radius)
 				$out = $out.union(S2LatLngRect.from_cap(vertex_cap))
 			}
 			$out
@@ -401,6 +404,129 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 			}
 		}
 	}
+
+	## True when the longitude interval wraps through 180 degrees, so that
+	## `lng_lo > lng_hi`.
+	is_inverted : S2LatLngRect -> Bool
+	is_inverted = |r| r.lng.is_inverted()
+
+	## The true centroid of the rectangle, multiplied by its area.
+	##
+	## The result is not unit length. Scaling by the area makes centroids
+	## of several shapes add up to the centroid of their union. The empty
+	## rectangle gives the zero vector.
+	centroid : S2LatLngRect -> S2Point
+	centroid = |r| {
+		if r.is_empty() {
+			return S2Point.zero()
+		}
+		# Slices of constant thickness have equal area, so z is the middle
+		# of the z range. In each slice the arc's centroid is at distance
+		# r * sin(alpha) / alpha from the z axis, where alpha is half the
+		# longitude span. Integrating over z and scaling by the area
+		# 2 * alpha * (z2 - z1) gives the formulas below.
+		low = r.lat_lo().sin_cos()
+		high = r.lat_hi().sin_cos()
+		z1 = low.sin
+		r1 = low.cos
+		z2 = high.sin
+		r2 = high.cos
+		alpha = 0.5 * r.lng.length()
+		radial = alpha.sin() * (r2 * z2 - r1 * z1 + r.lat.length())
+		z = alpha * (z2 + z1) * (z2 - z1)
+		mid = S1Angle.from_radians(r.lng.center()).sin_cos()
+		S2Point.new(radial * mid.cos, radial * mid.sin, z)
+	}
+
+	## True when the edge from `v0` to `v1` crosses the boundary of the
+	## rectangle, which is made of up to two meridian segments and two
+	## parallels. A side that is a pole or that the full longitude interval
+	## removes does not count.
+	boundary_intersects : S2LatLngRect, S2Point, S2Point -> Bool
+	boundary_intersects = |r, v0, v1| {
+		if r.is_empty() {
+			return Bool.False
+		}
+		meridians =
+			!r.lng.is_full()
+				and (intersects_lng_edge(v0, v1, r.lat, r.lng.lo()) or intersects_lng_edge(v0, v1, r.lat, r.lng.hi()))
+		meridians
+			or (r.lat.lo() != -0.5 * F64.pi and intersects_lat_edge(v0, v1, r.lat.lo(), r.lng))
+			or (r.lat.hi() != 0.5 * F64.pi and intersects_lat_edge(v0, v1, r.lat.hi(), r.lng))
+	}
+
+	## The distance between the closest points of two rectangles, which is
+	## zero when they meet. Both must be non-empty.
+	distance_to_rect : S2LatLngRect, S2LatLngRect -> S1Angle
+	distance_to_rect = |a, b| {
+		if a.lng.intersects(b.lng) {
+			if a.lat.intersects(b.lat) {
+				return S1Angle.from_radians(0.0)
+			}
+			# The shortest path runs along a meridian, from the top of the
+			# lower rectangle to the bottom of the higher one.
+			return if a.lat.lo() > b.lat.hi() {
+				a.lat_lo() - b.lat_hi()
+			} else {
+				b.lat_lo() - a.lat_hi()
+			}
+		}
+		# Otherwise the closest points are on the pair of meridian sides that
+		# are nearest in longitude, and at least one of them is an endpoint.
+		lo_hi = S1Interval.from_point_pair(a.lng.lo(), b.lng.hi())
+		hi_lo = S1Interval.from_point_pair(a.lng.hi(), b.lng.lo())
+		(a_lng, b_lng) =
+			if lo_hi.length() < hi_lo.length() {
+				(a.lng.lo(), b.lng.hi())
+			} else {
+				(a.lng.hi(), b.lng.lo())
+			}
+		a_lo = S2LatLng.from_radians(a.lat.lo(), a_lng).to_point()
+		a_hi = S2LatLng.from_radians(a.lat.hi(), a_lng).to_point()
+		b_lo = S2LatLng.from_radians(b.lat.lo(), b_lng).to_point()
+		b_hi = S2LatLng.from_radians(b.lat.hi(), b_lng).to_point()
+		edge_angle(a_lo, b_lo, b_hi)
+			.min(edge_angle(a_hi, b_lo, b_hi).min(edge_angle(b_lo, a_lo, a_hi).min(edge_angle(b_hi, a_lo, a_hi))))
+	}
+
+	## The distance from the point to the closest point of the rectangle,
+	## which must be non-empty. Zero when the rectangle contains the point.
+	distance_to_lat_lng : S2LatLngRect, S2LatLng -> S1Angle
+	distance_to_lat_lng = |r, p| {
+		if r.lng.contains_point(p.lng_radians()) {
+			return S1Angle.from_radians((0.0).max((p.lat_radians() - r.lat.hi()).max(r.lat.lo() - p.lat_radians())))
+		}
+		# Otherwise the closest point is on the nearer meridian side.
+		towards_hi = S1Interval.new(r.lng.hi(), r.lng.complement_center())
+		side_lng = if (towards_hi.contains_point(p.lng_radians())) r.lng.hi() else r.lng.lo()
+		side_lo = S2LatLng.from_radians(r.lat.lo(), side_lng).to_point()
+		side_hi = S2LatLng.from_radians(r.lat.hi(), side_lng).to_point()
+		edge_angle(p.to_point(), side_lo, side_hi)
+	}
+
+	## The directed Hausdorff distance from this rectangle to `other`: the
+	## largest distance from a point of this rectangle to its closest point
+	## of `other`.
+	##
+	## Zero when this rectangle is empty, and 180 degrees when only `other`
+	## is.
+	directed_hausdorff_distance : S2LatLngRect, S2LatLngRect -> S1Angle
+	directed_hausdorff_distance = |r, other| {
+		if r.is_empty() {
+			S1Angle.from_radians(0.0)
+		} else if other.is_empty() {
+			S1Angle.from_radians(F64.pi)
+		} else {
+			lng_distance = r.lng.directed_hausdorff_distance(other.lng)
+			directed_hausdorff_between_meridians(lng_distance, r.lat, other.lat)
+		}
+	}
+
+	## The Hausdorff distance between the rectangles: the larger of the two
+	## directed distances.
+	hausdorff_distance : S2LatLngRect, S2LatLngRect -> S1Angle
+	hausdorff_distance = |r, other|
+		r.directed_hausdorff_distance(other).max(other.directed_hausdorff_distance(r))
 
 	## The bounding cap of the rectangle.
 	##
@@ -671,7 +797,7 @@ expect {
 }
 expect {
 	r = S2LatLngRect.from_point(S2LatLng.from_degrees(0.0, 0.0))
-	grown = r.convolve_with_cap(S1Angle.from_degrees(5.0))
+	grown = r.expanded_by_distance(S1Angle.from_degrees(5.0))
 	grown.contains_lat_lng(S2LatLng.from_degrees(4.0, 0.0))
 		and grown.contains_lat_lng(S2LatLng.from_degrees(0.0, 4.0))
 }
@@ -680,7 +806,7 @@ expect {
 	# the distance. Longitude shrinks by asin(sin(2 deg) / cos(8 deg)), the
 	# half width of a 2 degree cap at the latitude of greatest magnitude.
 	r = S2LatLngRect.from_bounds(S2LatLng.from_degrees(-10.0, -10.0), S2LatLng.from_degrees(10.0, 10.0))
-	shrunk = r.convolve_with_cap(S1Angle.from_degrees(-2.0))
+	shrunk = r.expanded_by_distance(S1Angle.from_degrees(-2.0))
 	margin = 0.0352497734976641
 	ten_degrees = 10.0 * (F64.pi / 180.0)
 	(shrunk.lat().lo() + 8.0 * (F64.pi / 180.0)).abs() < 1e-15
@@ -691,12 +817,12 @@ expect {
 expect {
 	# Shrinking by more than half the height leaves nothing.
 	r = S2LatLngRect.from_bounds(S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(1.0, 10.0))
-	r.convolve_with_cap(S1Angle.from_degrees(-1.0)).is_empty()
+	r.expanded_by_distance(S1Angle.from_degrees(-1.0)).is_empty()
 }
 expect {
 	# A rectangle with every longitude has no boundary at the pole it touches.
 	r = S2LatLngRect.new(R1Interval.new(80.0 * (F64.pi / 180.0), 0.5 * F64.pi), S1Interval.full())
-	shrunk = r.convolve_with_cap(S1Angle.from_degrees(-5.0))
+	shrunk = r.expanded_by_distance(S1Angle.from_degrees(-5.0))
 	shrunk.lng().is_full()
 		and shrunk.lat().hi() == 0.5 * F64.pi
 		and (shrunk.lat().lo() - 85.0 * (F64.pi / 180.0)).abs() < 1e-15
@@ -816,3 +942,427 @@ cell_longitude = |cell, i, j|
 		S2Coords.face_uv_to_xyz(cell.face(), cell.bound_uv().x().bound(i), cell.bound_uv().y().bound(j)),
 	)
 		.radians()
+
+## The distance from `x` to the edge `ab`, as an angle.
+edge_angle : S2Point, S2Point, S2Point -> S1Angle
+edge_angle = |x, a, b| S2Edge.distance_to_edge(x, a, b).to_angle()
+
+## The directed Hausdorff distance from a meridian segment spanning `a`
+## to one spanning `b`, `lng_diff` radians of longitude away.
+##
+## By symmetry, `a` is at longitude 0 and `b` at `lng_diff`. The furthest
+## point of `a` from `b` is an endpoint of `a`, or where `a` meets the
+## equator (for `lng_diff` up to 90 degrees), or where `a` meets the
+## bisector of `b`, or the point of `a` furthest from one endpoint of `b`.
+directed_hausdorff_between_meridians : F64, R1Interval, R1Interval -> S1Angle
+directed_hausdorff_between_meridians = |lng_diff, a, b| {
+	if lng_diff == 0.0 {
+		return S1Angle.from_radians(a.directed_hausdorff_distance(b))
+	}
+	b_lng = lng_diff
+	b_lo = S2LatLng.from_radians(b.lo(), b_lng).to_point()
+	b_hi = S2LatLng.from_radians(b.hi(), b_lng).to_point()
+	a_lo = S2LatLng.from_radians(a.lo(), 0.0).to_point()
+	a_hi = S2LatLng.from_radians(a.hi(), 0.0).to_point()
+	endpoints = edge_angle(a_lo, b_lo, b_hi).max(edge_angle(a_hi, b_lo, b_hi))
+	if lng_diff <= 0.5 * F64.pi {
+		if a.contains_point(0.0) and b.contains_point(0.0) {
+			endpoints.max(S1Angle.from_radians(lng_diff))
+		} else {
+			endpoints
+		}
+	} else {
+		p = bisector_intersection(b, b_lng)
+		p_lat = S2LatLng.latitude(p).radians()
+		with_bisector = if (a.contains_point(p_lat)) endpoints.max(p.angle_to(b_lo)) else endpoints
+		below =
+			if p_lat > a.lo() {
+				with_bisector.max(interior_max_distance(R1Interval.new(a.lo(), p_lat.min(a.hi())), b_lo))
+			} else {
+				with_bisector
+			}
+		if p_lat < a.hi() {
+			below.max(interior_max_distance(R1Interval.new(p_lat.max(a.lo()), a.hi()), b_hi))
+		} else {
+			below
+		}
+	}
+}
+
+## Where longitude 0 meets the bisector of the meridian segment at `lng`
+## spanning `lat`. Not unit length.
+bisector_intersection : R1Interval, F64 -> S2Point
+bisector_intersection = |lat, lng_signed| {
+	lng = lng_signed.abs()
+	lat_center = lat.center()
+	# A vector orthogonal to the bisector of the segment.
+	ortho_bisector =
+		if lat_center >= 0.0 {
+			S2LatLng.from_radians(lat_center - 0.5 * F64.pi, lng)
+		} else {
+			S2LatLng.from_radians(-lat_center - 0.5 * F64.pi, lng - F64.pi)
+		}
+	# (0, -1, 0) is orthogonal to longitude 0.
+	S2Point.new(0.0, -1.0, 0.0).robust_cross(ortho_bisector.to_point())
+}
+
+## The largest distance from `b` to the segment of longitude 0 spanning
+## `a_lat`, when that maximum is interior to the segment, and `-1` radians
+## otherwise.
+interior_max_distance : R1Interval, S2Point -> S1Angle
+interior_max_distance = |a_lat, b| {
+	# Longitude 0 is in the plane y = 0. With b.x >= 0 the maximum is not
+	# interior.
+	if a_lat.is_empty() or b.x() >= 0.0 {
+		return S1Angle.from_radians(-1.0)
+	}
+	# The antipode of b projected onto that plane is the furthest point.
+	furthest = S2Point.new(-b.x(), 0.0, -b.z()).normalize()
+	if a_lat.interior_contains_point(S2LatLng.latitude(furthest).radians()) {
+		b.angle_to(furthest)
+	} else {
+		S1Angle.from_radians(-1.0)
+	}
+}
+
+# Centroids from upstream's S2LatLngRect::GetCentroid.
+expect S2LatLngRect.new(R1Interval.new(0.0, 0.17453292519943295), S1Interval.new(0.0, 0.17453292519943295)).centroid() == S2Point.new(0.030001455855351272, 0.00262478727661669, 0.002631405826336722)
+expect S2LatLngRect.new(R1Interval.new(-1.5707963267948966, 1.5707963267948966), S1Interval.new(-3.141592653589793, 3.141592653589793)).centroid() == S2Point.new(3.8473413874435795e-16, 0.0, 0.0)
+expect S2LatLngRect.new(R1Interval.new(0.5235987755982988, 1.0471975511965976), S1Interval.new(2.9670597283903604, -2.9670597283903604)).centroid() == S2Point.new(-0.0909219732112805, 1.1134730346535606e-17, 0.08726646259971638)
+expect S2LatLngRect.new(R1Interval.new(-0.17453292519943295, -0.08726646259971647), S1Interval.new(0.3490658503988659, 1.5707963267948966)).centroid() == S2Point.new(0.05640612773494667, 0.0805562988927052, -0.013779632996876751)
+expect S2LatLngRect.new(R1Interval.new(1.3962634015954636, 1.5707963267948966), S1Interval.new(-0.17453292519943295, 0.17453292519943295)).centroid() == S2Point.new(0.0006117370968178508, 0.0, 0.005262811652673459)
+expect S2LatLngRect.new(R1Interval.new(-0.7853981633974483, 0.7853981633974483), S1Interval.new(0.0, 0.0)).centroid() == S2Point.new(0.0, 0.0, 0.0)
+expect S2LatLngRect.empty().centroid() == S2Point.zero()
+# The cases of upstream's BoundaryIntersects tests.
+expect S2LatLngRect.new(R1Interval.new(-1.5707963267948966, 1.5707963267948966), S1Interval.new(1.7453292519943295, 2.0943951023931953)).boundary_intersects(S2LatLng.from_degrees(60.0, 60.0).to_point(), S2LatLng.from_degrees(90.0, 60.0).to_point()) == Bool.False
+expect S2LatLngRect.new(R1Interval.new(-1.5707963267948966, 1.5707963267948966), S1Interval.new(1.7453292519943295, 2.0943951023931953)).boundary_intersects(S2LatLng.from_degrees(-60.0, 110.0).to_point(), S2LatLng.from_degrees(60.0, 110.0).to_point()) == Bool.False
+expect S2LatLngRect.new(R1Interval.new(-1.5707963267948966, 1.5707963267948966), S1Interval.new(1.7453292519943295, 2.0943951023931953)).boundary_intersects(S2LatLng.from_degrees(-60.0, 95.0).to_point(), S2LatLng.from_degrees(60.0, 110.0).to_point()) == Bool.True
+expect S2LatLngRect.new(R1Interval.new(-1.5707963267948966, 1.5707963267948966), S1Interval.new(1.7453292519943295, 2.0943951023931953)).boundary_intersects(S2LatLng.from_degrees(60.0, 115.0).to_point(), S2LatLng.from_degrees(80.0, 125.0).to_point()) == Bool.True
+expect S2LatLngRect.new(R1Interval.new(0.0, 1.5707963267948966), S1Interval.new(-3.141592653589793, 3.141592653589793)).boundary_intersects(S2LatLng.from_degrees(60.0, -180.0).to_point(), S2LatLng.from_degrees(90.0, -180.0).to_point()) == Bool.False
+expect S2LatLngRect.new(R1Interval.new(0.0, 1.5707963267948966), S1Interval.new(-3.141592653589793, 3.141592653589793)).boundary_intersects(S2LatLng.from_degrees(60.0, -170.0).to_point(), S2LatLng.from_degrees(60.0, 170.0).to_point()) == Bool.False
+expect S2LatLngRect.new(R1Interval.new(0.0, 1.5707963267948966), S1Interval.new(-3.141592653589793, 3.141592653589793)).boundary_intersects(S2LatLng.from_degrees(-10.0, -180.0).to_point(), S2LatLng.from_degrees(10.0, -180.0).to_point()) == Bool.True
+expect S2LatLngRect.new(R1Interval.new(-1.5707963267948966, 0.0), S1Interval.new(-3.141592653589793, 3.141592653589793)).boundary_intersects(S2LatLng.from_degrees(-90.0, -180.0).to_point(), S2LatLng.from_degrees(-60.0, -180.0).to_point()) == Bool.False
+expect S2LatLngRect.new(R1Interval.new(-1.5707963267948966, 0.0), S1Interval.new(-3.141592653589793, 3.141592653589793)).boundary_intersects(S2LatLng.from_degrees(-60.0, -170.0).to_point(), S2LatLng.from_degrees(-60.0, 170.0).to_point()) == Bool.False
+expect S2LatLngRect.new(R1Interval.new(-1.5707963267948966, 0.0), S1Interval.new(-3.141592653589793, 3.141592653589793)).boundary_intersects(S2LatLng.from_degrees(-10.0, -180.0).to_point(), S2LatLng.from_degrees(10.0, -180.0).to_point()) == Bool.True
+expect S2LatLngRect.new(R1Interval.new(0.3490658503988659, 0.6981317007977318), S1Interval.new(2.9670597283903604, -2.9670597283903604)).boundary_intersects(S2LatLng.from_degrees(25.0, 160.0).to_point(), S2LatLng.from_degrees(25.0, 180.0).to_point()) == Bool.True
+expect S2LatLngRect.new(R1Interval.new(0.3490658503988659, 0.6981317007977318), S1Interval.new(2.9670597283903604, -2.9670597283903604)).boundary_intersects(S2LatLng.from_degrees(25.0, -160.0).to_point(), S2LatLng.from_degrees(25.0, -180.0).to_point()) == Bool.True
+expect S2LatLngRect.new(R1Interval.new(0.3490658503988659, 0.6981317007977318), S1Interval.new(2.9670597283903604, -2.9670597283903604)).boundary_intersects(S2LatLng.from_degrees(15.0, 175.0).to_point(), S2LatLng.from_degrees(30.0, 175.0).to_point()) == Bool.True
+expect S2LatLngRect.new(R1Interval.new(0.3490658503988659, 0.6981317007977318), S1Interval.new(2.9670597283903604, -2.9670597283903604)).boundary_intersects(S2LatLng.from_degrees(45.0, 175.0).to_point(), S2LatLng.from_degrees(30.0, 175.0).to_point()) == Bool.True
+expect S2LatLngRect.new(R1Interval.new(0.3490658503988659, 0.6981317007977318), S1Interval.new(2.9670597283903604, -2.9670597283903604)).boundary_intersects(S2LatLng.from_degrees(25.0, -20.0).to_point(), S2LatLng.from_degrees(25.0, 0.0).to_point()) == Bool.False
+expect S2LatLngRect.new(R1Interval.new(0.3490658503988659, 0.6981317007977318), S1Interval.new(2.9670597283903604, -2.9670597283903604)).boundary_intersects(S2LatLng.from_degrees(25.0, 20.0).to_point(), S2LatLng.from_degrees(25.0, 0.0).to_point()) == Bool.False
+expect S2LatLngRect.new(R1Interval.new(0.3490658503988659, 0.6981317007977318), S1Interval.new(2.9670597283903604, -2.9670597283903604)).boundary_intersects(S2LatLng.from_degrees(15.0, -5.0).to_point(), S2LatLng.from_degrees(30.0, -5.0).to_point()) == Bool.False
+expect S2LatLngRect.new(R1Interval.new(0.3490658503988659, 0.6981317007977318), S1Interval.new(2.9670597283903604, -2.9670597283903604)).boundary_intersects(S2LatLng.from_degrees(45.0, -5.0).to_point(), S2LatLng.from_degrees(30.0, -5.0).to_point()) == Bool.False
+expect !S2LatLngRect.empty().boundary_intersects(S2Point.new(0.0, 0.0, 1.0), S2Point.new(1.0, 0.0, 0.0))
+expect !S2LatLngRect.full().boundary_intersects(S2Point.new(0.0, 0.0, 1.0), S2Point.new(1.0, 0.0, 0.0))
+# The cases of upstream's ExpandedByDistance tests.
+expect S2LatLngRect.new(R1Interval.new(0.0, 0.0), S1Interval.new(2.9670597283903604, -2.9670597283903604)).expanded_by_distance(S1Angle.from_radians(0.2617993877991494)) == S2LatLngRect.new(R1Interval.new(-0.2617993877991494, 0.2617993877991494), S1Interval.new(2.7052603405912112, -2.7052603405912112))
+expect S2LatLngRect.new(R1Interval.new(1.0471975511965976, 1.3962634015954636), S1Interval.new(2.6179938779914944, 0.17453292519943295)).expanded_by_distance(S1Angle.from_radians(0.2617993877991494)) == S2LatLngRect.new(R1Interval.new(0.7853981633974483, 1.5707963267948966), S1Interval.new(-3.141592653589793, 3.141592653589793))
+# S2Cap.from_cap rounds one latitude one unit in the last place away from
+# upstream here, so the comparison allows for that.
+expect S2LatLngRect.new(R1Interval.new(0.0, 0.5235987755982988), S1Interval.new(0.0, 1.5707963267948966)).expanded_by_distance(S1Angle.from_radians(0.08726646259971647)) |> S2LatLngRect.approx_eq(S2LatLngRect.new(R1Interval.new(-0.08726646259971647, 0.6108652381980153), S1Interval.new(-0.10080944306377845, 1.671605769858675)), 1e-15)
+expect S2LatLngRect.new(R1Interval.new(0.0, 0.5235987755982988), S1Interval.new(0.0, 1.5707963267948966)).expanded_by_distance(S1Angle.from_radians(-0.08726646259971647)) == S2LatLngRect.new(R1Interval.new(0.08726646259971647, 0.43633231299858233), S1Interval.new(0.09631456326785683, 1.4744817635270397))
+expect S2LatLngRect.new(R1Interval.new(-0.5235987755982988, 0.0), S1Interval.new(-1.5707963267948966, 0.0)).expanded_by_distance(S1Angle.from_radians(-0.08726646259971647)) == S2LatLngRect.new(R1Interval.new(-0.43633231299858233, -0.08726646259971647), S1Interval.new(-1.4744817635270397, -0.09631456326785683))
+expect S2LatLngRect.new(R1Interval.new(0.0, 1.5707963267948966), S1Interval.new(-1.5707963267948966, 3.141592653589793)).expanded_by_distance(S1Angle.from_radians(-0.08726646259971647)) == S2LatLngRect.new(R1Interval.new(0.08726646259971647, 1.4835298641951802), S1Interval.new(0.0, 1.5707963267948966))
+expect S2LatLngRect.new(R1Interval.new(0.0, 1.5707963267948966), S1Interval.new(-3.141592653589793, 3.141592653589793)).expanded_by_distance(S1Angle.from_radians(-0.08726646259971647)) == S2LatLngRect.new(R1Interval.new(0.08726646259971647, 1.5707963267948966), S1Interval.new(-3.141592653589793, 3.141592653589793))
+expect S2LatLngRect.new(R1Interval.new(-1.5707963267948966, 0.0), S1Interval.new(-1.5707963267948966, 3.141592653589793)).expanded_by_distance(S1Angle.from_radians(-0.08726646259971647)) == S2LatLngRect.new(R1Interval.new(-1.4835298641951802, -0.08726646259971647), S1Interval.new(0.0, 1.5707963267948966))
+expect S2LatLngRect.new(R1Interval.new(-1.5707963267948966, 0.0), S1Interval.new(-3.141592653589793, 3.141592653589793)).expanded_by_distance(S1Angle.from_radians(-0.08726646259971647)) == S2LatLngRect.new(R1Interval.new(-1.5707963267948966, -0.08726646259971647), S1Interval.new(-3.141592653589793, 3.141592653589793))
+expect S2LatLngRect.new(R1Interval.new(0.0, 0.5235987755982988), S1Interval.new(-3.141592653589793, 3.141592653589793)).expanded_by_distance(S1Angle.from_radians(-0.08726646259971647)) == S2LatLngRect.new(R1Interval.new(0.08726646259971647, 0.43633231299858233), S1Interval.new(-3.141592653589793, 3.141592653589793))
+expect S2LatLngRect.new(R1Interval.new(0.0, 0.17278759594743864), S1Interval.new(0.0, 1.5707963267948966)).expanded_by_distance(S1Angle.from_radians(-0.08726646259971647)) == S2LatLngRect.new(R1Interval.new(1.0, 0.0), S1Interval.new(3.141592653589793, -3.141592653589793))
+expect S2LatLngRect.new(R1Interval.new(0.0, 0.5235987755982988), S1Interval.new(0.0, 0.19198621771937624)).expanded_by_distance(S1Angle.from_radians(-0.08726646259971647)) == S2LatLngRect.new(R1Interval.new(1.0, 0.0), S1Interval.new(3.141592653589793, -3.141592653589793))
+# Distances and Hausdorff distances between rectangles, from the cases of
+# upstream's GetDistance and GetDirectedHausdorffDistance tests.
+expect {
+	a = S2LatLngRect.new(R1Interval.new(0.0, 0.03490658503988659), S1Interval.new(0.0, 0.03490658503988659))
+	b = S2LatLngRect.new(R1Interval.new(0.0, 0.0), S1Interval.new(0.0, 0.0))
+	a.distance_to_rect(b).radians() == 0.0
+		and a.directed_hausdorff_distance(b).radians() == 0.049360352393795104
+		and a.hausdorff_distance(b).radians() == 0.049360352393795104
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(0.0, 0.03490658503988659), S1Interval.new(0.0, 0.03490658503988659))
+	b = S2LatLngRect.new(R1Interval.new(0.0, 0.03490658503988659), S1Interval.new(0.017453292519943295, 0.05235987755982989))
+	a.distance_to_rect(b).radians() == 0.0
+		and a.directed_hausdorff_distance(b).radians() == 0.017453292519943295
+		and a.hausdorff_distance(b).radians() == 0.0174532925199433
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-0.017453292519943295, 0.03490658503988659), S1Interval.new(-0.017453292519943295, 0.017453292519943295))
+	b = S2LatLngRect.new(R1Interval.new(-0.03490658503988659, -0.03490658503988659), S1Interval.new(-0.017453292519943295, -0.017453292519943295))
+	a.distance_to_rect(b).radians() == 0.017453292519943295
+		and a.directed_hausdorff_distance(b).radians() == 0.0780503264312706
+		and a.hausdorff_distance(b).radians() == 0.0780503264312706
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-0.017453292519943295, 0.03490658503988659), S1Interval.new(-0.017453292519943295, 0.017453292519943295))
+	b = S2LatLngRect.new(R1Interval.new(0.017453292519943295, 0.017453292519943295), S1Interval.new(0.03490658503988659, 0.03490658503988659))
+	a.distance_to_rect(b).radians() == 0.017450634029070905
+		and a.directed_hausdorff_distance(b).radians() == 0.06292652909176503
+		and a.hausdorff_distance(b).radians() == 0.06292652909176503
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(1.5009831567151235, 1.53588974175501), S1Interval.new(0.0, 0.03490658503988659))
+	b = S2LatLngRect.new(R1Interval.new(1.5184364492350666, 1.5184364492350666), S1Interval.new(0.05235987755982989, 0.05235987755982989))
+	a.distance_to_rect(b).radians() == 0.000913388506639147
+		and a.directed_hausdorff_distance(b).radians() == 0.017737656209365297
+		and a.hausdorff_distance(b).radians() == 0.017737656209365297
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(1.5009831567151235, 1.53588974175501), S1Interval.new(0.0, 0.03490658503988659))
+	b = S2LatLngRect.new(R1Interval.new(1.5533430342749532, 1.5533430342749532), S1Interval.new(3.1590459461097367, 3.1590459461097367))
+	a.distance_to_rect(b).radians() == 0.05235810502254987
+		and a.directed_hausdorff_distance(b).radians() == 0.08726646259971649
+		and a.hausdorff_distance(b).radians() == 0.08726646259971649
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(1.5009831567151235, 1.53588974175501), S1Interval.new(0.0, 0.03490658503988659))
+	b = S2LatLngRect.new(R1Interval.new(1.4835298641951802, 1.4835298641951802), S1Interval.new(3.1590459461097367, 3.1590459461097367))
+	a.distance_to_rect(b).radians() == 0.12216924626088659
+		and a.directed_hausdorff_distance(b).radians() == 0.15707963267948957
+		and a.hausdorff_distance(b).radians() == 0.15707963267948957
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(1.5009831567151235, 1.53588974175501), S1Interval.new(0.0, 0.03490658503988659))
+	b = S2LatLngRect.new(R1Interval.new(1.5707963267948966, 1.5707963267948966), S1Interval.new(0.0, 0.0))
+	a.distance_to_rect(b).radians() == 0.03490658503988664
+		and a.directed_hausdorff_distance(b).radians() == 0.06981317007977306
+		and a.hausdorff_distance(b).radians() == 0.06981317007977306
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(1.53588974175501, 1.5707963267948966), S1Interval.new(0.0, 0.03490658503988659))
+	b = S2LatLngRect.new(R1Interval.new(1.5533430342749532, 1.5533430342749532), S1Interval.new(1.5707963267948966, 1.5707963267948966))
+	a.distance_to_rect(b).radians() == 0.01744265936699575
+		and a.directed_hausdorff_distance(b).radians() == 0.039025163215635435
+		and a.hausdorff_distance(b).radians() == 0.039025163215635435
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(1.5533430342749532, 1.5533430342749532), S1Interval.new(1.5707963267948966, 1.5707963267948966))
+	b = S2LatLngRect.new(R1Interval.new(1.53588974175501, 1.5707963267948966), S1Interval.new(0.0, 0.03490658503988659))
+	a.distance_to_rect(b).radians() == 0.01744265936699575
+		and a.directed_hausdorff_distance(b).radians() == 0.01744265936699575
+		and a.hausdorff_distance(b).radians() == 0.039025163215635435
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-0.017453292519943295, 0.03490658503988659), S1Interval.new(-0.017453292519943295, 0.017453292519943295))
+	b = S2LatLngRect.new(R1Interval.new(0.0, 0.017453292519943295), S1Interval.new(0.03490658503988659, 0.05235987755982989))
+	a.distance_to_rect(b).radians() == 0.017450634029070905
+		and a.directed_hausdorff_distance(b).radians() == 0.05518963458845597
+		and a.hausdorff_distance(b).radians() == 0.05518963458845597
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-0.017453292519943295, 0.03490658503988659), S1Interval.new(-0.017453292519943295, 0.017453292519943295))
+	b = S2LatLngRect.new(R1Interval.new(-0.03490658503988659, -0.017453292519943295), S1Interval.new(-0.05235987755982989, -0.03490658503988659))
+	a.distance_to_rect(b).radians() == 0.0174506340290709
+		and a.directed_hausdorff_distance(b).radians() == 0.07404240835575013
+		and a.hausdorff_distance(b).radians() == 0.07404240835575013
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-1.5184364492350666, -1.4835298641951802), S1Interval.new(0.0, 0.05235987755982989))
+	b = S2LatLngRect.new(R1Interval.new(-1.5533430342749532, -1.53588974175501), S1Interval.new(0.017453292519943295, 0.03490658503988659))
+	a.distance_to_rect(b).radians() == 0.01745329251994332
+		and a.directed_hausdorff_distance(b).radians() == 0.05236872855394031
+		and a.hausdorff_distance(b).radians() == 0.05236872855394031
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-1.5184364492350666, -1.4835298641951802), S1Interval.new(0.0, 0.05235987755982989))
+	b = S2LatLngRect.new(R1Interval.new(-1.4660765716752369, -1.4486232791552935), S1Interval.new(0.017453292519943295, 0.03490658503988659))
+	a.distance_to_rect(b).radians() == 0.01745329251994332
+		and a.directed_hausdorff_distance(b).radians() == 0.052375795333734536
+		and a.hausdorff_distance(b).radians() == 0.052375795333734536
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-1.5184364492350666, -1.4835298641951802), S1Interval.new(0.0, 0.05235987755982989))
+	b = S2LatLngRect.new(R1Interval.new(-1.53588974175501, -1.5009831567151235), S1Interval.new(1.5707963267948966, 1.5882496193148399))
+	a.distance_to_rect(b).radians() == 0.061380830994909805
+		and a.directed_hausdorff_distance(b).radians() == 0.09397239111751715
+		and a.hausdorff_distance(b).radians() == 0.09397239111751715
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-1.5184364492350666, -1.4835298641951802), S1Interval.new(0.0, 0.05235987755982989))
+	b = S2LatLngRect.new(R1Interval.new(-1.4660765716752369, -1.4486232791552935), S1Interval.new(-1.5882496193148399, -1.5707963267948966))
+	a.distance_to_rect(b).radians() == 0.1170374009302116
+		and a.directed_hausdorff_distance(b).radians() == 0.13967966930929385
+		and a.hausdorff_distance(b).radians() == 0.13967966930929385
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-1.5184364492350666, -1.4835298641951802), S1Interval.new(0.0, 0.05235987755982989))
+	b = S2LatLngRect.new(R1Interval.new(-1.5707963267948966, -1.5533430342749532), S1Interval.new(3.1590459461097367, 3.1764992386296798))
+	a.distance_to_rect(b).radians() == 0.05235987755983009
+		and a.directed_hausdorff_distance(b).radians() == 0.08726646259971649
+		and a.hausdorff_distance(b).radians() == 0.08726646259971649
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-1.5184364492350666, -1.4835298641951802), S1Interval.new(0.0, 0.05235987755982989))
+	b = S2LatLngRect.new(R1Interval.new(-1.4660765716752369, -1.4486232791552935), S1Interval.new(3.1590459461097367, 3.1764992386296798))
+	a.distance_to_rect(b).radians() == 0.15705832814102108
+		and a.directed_hausdorff_distance(b).radians() == 0.19198439971153503
+		and a.hausdorff_distance(b).radians() == 0.19198439971153503
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-0.17453292519943295, -0.08726646259971647), S1Interval.new(0.3490658503988659, 1.5707963267948966))
+	b = S2LatLngRect.new(R1Interval.new(-0.19198621771937624, -0.06981317007977318), S1Interval.new(0.33161255787892263, 1.5882496193148399))
+	a.distance_to_rect(b).radians() == 0.0
+		and a.directed_hausdorff_distance(b).radians() == 0.0
+		and a.hausdorff_distance(b).radians() == 0.024644508341014268
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(0.08726646259971647, 0.08726646259971647), S1Interval.new(0.13962634015954636, 0.13962634015954636))
+	b = S2LatLngRect.new(R1Interval.new(-1.4835298641951802, -1.3962634015954636), S1Interval.new(-0.8726646259971648, 0.17453292519943295))
+	a.distance_to_rect(b).radians() == 1.48352986419518
+		and a.directed_hausdorff_distance(b).radians() == 1.48352986419518
+		and a.hausdorff_distance(b).radians() == 1.6116219983433244
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(1.5707963267948966, 1.5707963267948966), S1Interval.new(0.17453292519943295, 0.17453292519943295))
+	b = S2LatLngRect.new(R1Interval.new(0.06981317007977318, 1.3962634015954636), S1Interval.new(-0.17453292519943295, 0.17453292519943295))
+	a.distance_to_rect(b).radians() == 0.17453292519943298
+		and a.directed_hausdorff_distance(b).radians() == 0.17453292519943298
+		and a.hausdorff_distance(b).radians() == 1.5009831567151233
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(0.017453292519943295, 0.17453292519943295), S1Interval.new(-0.13962634015954636, 0.3490658503988659))
+	b = S2LatLngRect.new(R1Interval.new(-0.10471975511965978, -0.10471975511965978), S1Interval.new(-1.7453292519943295, -1.7453292519943295))
+	a.distance_to_rect(b).radians() == 1.6073317549846824
+		and a.directed_hausdorff_distance(b).radians() == 2.103492309003092
+		and a.hausdorff_distance(b).radians() == 2.103492309003092
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(0.017453292519943295, 0.17453292519943295), S1Interval.new(-0.13962634015954636, 0.3490658503988659))
+	b = S2LatLngRect.new(R1Interval.new(-1.5707963267948966, -1.5707963267948966), S1Interval.new(-0.3490658503988659, -0.3490658503988659))
+	a.distance_to_rect(b).radians() == 1.5882496193148399
+		and a.directed_hausdorff_distance(b).radians() == 1.7453292519943295
+		and a.hausdorff_distance(b).radians() == 1.7453292519943295
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(0.017453292519943295, 0.17453292519943295), S1Interval.new(-0.13962634015954636, 0.3490658503988659))
+	b = S2LatLngRect.new(R1Interval.new(1.5707963267948966, 1.5707963267948966), S1Interval.new(0.0, 0.0))
+	a.distance_to_rect(b).radians() == 1.3962634015954636
+		and a.directed_hausdorff_distance(b).radians() == 1.5533430342749532
+		and a.hausdorff_distance(b).radians() == 1.5533430342749532
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(0.0, 1.5707963267948966), S1Interval.new(0.17453292519943295, 0.3490658503988659))
+	b = S2LatLngRect.new(R1Interval.new(-0.06981317007977318, 0.06981317007977318), S1Interval.new(-0.17453292519943295, 0.0))
+	a.distance_to_rect(b).radians() == 0.17410341778748667
+		and a.directed_hausdorff_distance(b).radians() == 1.5009831567151233
+		and a.hausdorff_distance(b).radians() == 1.5009831567151233
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-0.06981317007977318, 0.06981317007977318), S1Interval.new(-0.17453292519943295, 0.0))
+	b = S2LatLngRect.new(R1Interval.new(0.0, 1.5707963267948966), S1Interval.new(0.17453292519943295, 0.3490658503988659))
+	a.distance_to_rect(b).radians() == 0.17410341778748667
+		and a.directed_hausdorff_distance(b).radians() == 0.3556981882615224
+		and a.hausdorff_distance(b).radians() == 1.5009831567151233
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-0.8726646259971648, 0.8726646259971648), S1Interval.new(-0.17453292519943295, 0.17453292519943295))
+	b = S2LatLngRect.new(R1Interval.new(0.5235987755982988, 1.0471975511965976), S1Interval.new(-0.17453292519943295, 0.17453292519943295))
+	a.distance_to_rect(b).radians() == 0.0
+		and a.directed_hausdorff_distance(b).radians() == 1.3962634015954636
+		and a.hausdorff_distance(b).radians() == 1.3962634015954636
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(0.17453292519943295, 0.5235987755982988), S1Interval.new(2.9670597283903604, 3.141592653589793))
+	b = S2LatLngRect.new(R1Interval.new(-0.8726646259971648, 0.8726646259971648), S1Interval.new(-0.17453292519943295, 0.17453292519943295))
+	a.distance_to_rect(b).radians() == 1.711335351067482
+		and a.directed_hausdorff_distance(b).radians() == 2.083325459694037
+		and a.hausdorff_distance(b).radians() == 2.94892236548937
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(0.17453292519943295, 0.5235987755982988), S1Interval.new(-3.141592653589793, -2.9670597283903604))
+	b = S2LatLngRect.new(R1Interval.new(-0.8726646259971648, 0.8726646259971648), S1Interval.new(-0.17453292519943295, 0.17453292519943295))
+	a.distance_to_rect(b).radians() == 1.711335351067482
+		and a.directed_hausdorff_distance(b).radians() == 2.083325459694037
+		and a.hausdorff_distance(b).radians() == 2.94892236548937
+}
+# The trigonometry here can differ from the C library's by one unit in the
+# last place, so this case allows for that.
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-0.5235987755982988, 0.5235987755982988), S1Interval.new(2.9670597283903604, 3.141592653589793))
+	b = S2LatLngRect.new(R1Interval.new(-0.17453292519943295, 0.17453292519943295), S1Interval.new(-1.5707963267948966, 1.5707963267948966))
+	(a.distance_to_rect(b).radians() - 1.3336568167613847).abs() <= 1e-15
+		and (a.directed_hausdorff_distance(b).radians() - 1.5707963267948966).abs() <= 1e-15
+		and (a.hausdorff_distance(b).radians() - 2.6114400527624055).abs() <= 1e-15
+}
+# The trigonometry here can differ from the C library's by one unit in the
+# last place, so this case allows for that.
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-0.5235987755982988, 0.5235987755982988), S1Interval.new(-3.141592653589793, -2.9670597283903604))
+	b = S2LatLngRect.new(R1Interval.new(-0.17453292519943295, 0.17453292519943295), S1Interval.new(-1.5707963267948966, 1.5707963267948966))
+	(a.distance_to_rect(b).radians() - 1.3336568167613847).abs() <= 1e-15
+		and (a.directed_hausdorff_distance(b).radians() - 1.5707963267948966).abs() <= 1e-15
+		and (a.hausdorff_distance(b).radians() - 2.6114400527624055).abs() <= 1e-15
+}
+# The trigonometry here can differ from the C library's by one unit in the
+# last place, so this case allows for that.
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-0.3490658503988659, 0.3490658503988659), S1Interval.new(1.8325957145940461, 1.9198621771937625))
+	b = S2LatLngRect.new(R1Interval.new(-0.5235987755982988, 0.5235987755982988), S1Interval.new(0.08726646259971647, 0.2617993877991494))
+	(a.distance_to_rect(b).radians() - 1.3989415754761576).abs() <= 1e-15
+		and (a.directed_hausdorff_distance(b).radians() - 1.6463472670202026).abs() <= 1e-15
+		and (a.hausdorff_distance(b).radians() - 1.7347051850363522).abs() <= 1e-15
+}
+# The trigonometry here can differ from the C library's by one unit in the
+# last place, so this case allows for that.
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-0.3490658503988659, 0.3490658503988659), S1Interval.new(1.6580627893946132, 1.8325957145940461))
+	b = S2LatLngRect.new(R1Interval.new(-0.5235987755982988, 0.5235987755982988), S1Interval.new(0.08726646259971647, 0.2617993877991494))
+	(a.distance_to_rect(b).radians() - 1.253157311121183).abs() <= 1e-15
+		and (a.directed_hausdorff_distance(b).radians() - 1.5707963267948968).abs() <= 1e-15
+		and (a.hausdorff_distance(b).radians() - 1.5707963267948968).abs() <= 1e-15
+}
+expect S2LatLngRect.empty().directed_hausdorff_distance(S2LatLngRect.full()).radians() == 0.0
+expect S2LatLngRect.full().directed_hausdorff_distance(S2LatLngRect.empty()).radians() == F64.pi
+expect S2LatLngRect.new(R1Interval.new(-0.017453292519943295, 0.03490658503988659), S1Interval.new(-0.017453292519943295, 0.017453292519943295)).distance_to_lat_lng(S2LatLng.from_radians(-0.03490658503988659, -0.017453292519943295)).radians() == 0.017453292519943295
+expect S2LatLngRect.new(R1Interval.new(-0.017453292519943295, 0.03490658503988659), S1Interval.new(-0.017453292519943295, 0.017453292519943295)).distance_to_lat_lng(S2LatLng.from_radians(0.017453292519943295, 0.03490658503988659)).radians() == 0.017450634029070905
+expect S2LatLngRect.new(R1Interval.new(1.5009831567151235, 1.53588974175501), S1Interval.new(0.0, 0.03490658503988659)).distance_to_lat_lng(S2LatLng.from_radians(1.5184364492350666, 0.05235987755982989)).radians() == 0.000913388506639147
+expect S2LatLngRect.new(R1Interval.new(1.5009831567151235, 1.53588974175501), S1Interval.new(0.0, 0.03490658503988659)).distance_to_lat_lng(S2LatLng.from_radians(1.5184364492350666, -0.017453292519943295)).radians() == 0.000913388506639147
+expect S2LatLngRect.new(R1Interval.new(1.5009831567151235, 1.53588974175501), S1Interval.new(0.0, 0.03490658503988659)).distance_to_lat_lng(S2LatLng.from_radians(1.5533430342749532, 0.017453292519943295)).radians() == 0.01745329251994332
+expect S2LatLngRect.new(R1Interval.new(1.5009831567151235, 1.53588974175501), S1Interval.new(0.0, 0.03490658503988659)).distance_to_lat_lng(S2LatLng.from_radians(1.5533430342749532, 3.1590459461097367)).radians() == 0.052358105022549874
+expect S2LatLngRect.new(R1Interval.new(1.5009831567151235, 1.53588974175501), S1Interval.new(0.0, 0.03490658503988659)).distance_to_lat_lng(S2LatLng.from_radians(1.4835298641951802, 0.017453292519943295)).radians() == 0.01745329251994332
+expect S2LatLngRect.new(R1Interval.new(1.5009831567151235, 1.53588974175501), S1Interval.new(0.0, 0.03490658503988659)).distance_to_lat_lng(S2LatLng.from_radians(1.4835298641951802, 3.1590459461097367)).radians() == 0.12216924626088659
+expect S2LatLngRect.new(R1Interval.new(1.5009831567151235, 1.53588974175501), S1Interval.new(0.0, 0.03490658503988659)).distance_to_lat_lng(S2LatLng.from_radians(1.5707963267948966, 0.0)).radians() == 0.03490658503988664
+expect S2LatLngRect.new(R1Interval.new(0.0, 0.03490658503988659), S1Interval.new(0.0, 0.03490658503988659)).distance_to_lat_lng(S2LatLng.from_radians(0.0, 0.0)).radians() == 0.0
+expect S2LatLngRect.new(R1Interval.new(0.3490658503988659, 0.6981317007977318), S1Interval.new(2.9670597283903604, -2.9670597283903604)).distance_to_lat_lng(S2LatLng.from_radians(0.5235987755982988, -3.0543261909900767)).radians() == 0.0
+expect S2LatLngRect.new(R1Interval.new(0.0, 1.0), S1Interval.new(3.0, -3.0)).is_inverted()
+expect !S2LatLngRect.new(R1Interval.new(0.0, 1.0), S1Interval.new(-3.0, 3.0)).is_inverted()
+
+# Directed Hausdorff distances where the second rectangle is more than 90
+# degrees of longitude away, which uses the bisector of its side, north and
+# south of the equator.
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-0.17453292519943295, 0.17453292519943295), S1Interval.new(0.0, 0.17453292519943295))
+	b = S2LatLngRect.new(R1Interval.new(-1.0471975511965976, -0.3490658503988659), S1Interval.new(2.0943951023931953, 2.2689280275926285))
+	a.distance_to_rect(b).radians() == 1.5888256147676947
+		and a.directed_hausdorff_distance(b).radians() == 1.9785908499402132
+		and a.hausdorff_distance(b).radians() == 1.9859353125078898
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-0.17453292519943295, 0.17453292519943295), S1Interval.new(0.0, 0.17453292519943295))
+	b = S2LatLngRect.new(R1Interval.new(0.3490658503988659, 1.0471975511965976), S1Interval.new(2.0943951023931953, 2.2689280275926285))
+	a.distance_to_rect(b).radians() == 1.5888256147676947
+		and a.directed_hausdorff_distance(b).radians() == 1.9785908499402132
+		and a.hausdorff_distance(b).radians() == 1.9859353125078898
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-1.3962634015954636, -1.2217304763960306), S1Interval.new(0.0, 0.17453292519943295))
+	b = S2LatLngRect.new(R1Interval.new(-1.0471975511965976, -0.3490658503988659), S1Interval.new(2.6179938779914944, 2.792526803190927))
+	a.distance_to_rect(b).radians() == 0.6659059765174941
+		and a.directed_hausdorff_distance(b).radians() == 0.84236669505459
+		and a.hausdorff_distance(b).radians() == 1.3740192710645267
+}
+# The trigonometry here can differ from the C library's by one unit in the
+# last place, so this case allows for that.
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-0.5235987755982988, 0.6981317007977318), S1Interval.new(0.0, 0.08726646259971647))
+	b = S2LatLngRect.new(R1Interval.new(-0.8726646259971648, -0.8552113334772214), S1Interval.new(1.7453292519943295, 1.9198621771937625))
+	(a.distance_to_rect(b).radians() - 1.2297161920770543).abs() <= 1e-15
+		and a.directed_hausdorff_distance(b).radians() == 2.1802119714142494
+		and a.hausdorff_distance(b).radians() == 2.1802119714142494
+}
+expect {
+	a = S2LatLngRect.new(R1Interval.new(-1.5533430342749532, 1.5533430342749532), S1Interval.new(0.0, 0.017453292519943295))
+	b = S2LatLngRect.new(R1Interval.new(-0.17453292519943295, -0.08726646259971647), S1Interval.new(2.9670597283903604, 2.9845130209103035))
+	a.distance_to_rect(b).radians() == 1.4133969713264
+		and a.directed_hausdorff_distance(b).radians() == 2.963160949125901
+		and a.hausdorff_distance(b).radians() == 2.963160949125901
+}

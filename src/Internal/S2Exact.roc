@@ -138,6 +138,144 @@ S2Exact := [].{
 			|> S2Exact.add(S2Exact.product3(a1, b0, c2))
 		S2Exact.sign_of(S2Exact.add(positive, negative.map(|t| -t)))
 	}
+
+	## The expansion whose value is exactly `a`.
+	from_f64 : F64 -> List(F64)
+	from_f64 = |a| if (a == 0.0) [] else [a]
+
+	## The exact negation of an expansion.
+	negate : List(F64) -> List(F64)
+	negate = |expansion| expansion.map(|t| -t)
+
+	## The exact difference of two expansions.
+	sub : List(F64), List(F64) -> List(F64)
+	sub = |a, b| S2Exact.add(a, S2Exact.negate(b))
+
+	## The exact product of two expansions.
+	mul : List(F64), List(F64) -> List(F64)
+	mul = |a, b| b.fold([], |acc, term| S2Exact.add(acc, S2Exact.scale(a, term)))
+
+	## The exact square of an expansion.
+	square : List(F64) -> List(F64)
+	square = |a| S2Exact.mul(a, a)
+
+	## The exact cross product of two vectors of doubles, as a vector of
+	## expansions.
+	cross : (F64, F64, F64), (F64, F64, F64) -> (List(F64), List(F64), List(F64))
+	cross = |(a0, a1, a2), (b0, b1, b2)| (
+		S2Exact.det2(a1, a2, b1, b2),
+		S2Exact.det2(a2, a0, b2, b0),
+		S2Exact.det2(a0, a1, b0, b1),
+	)
+
+	## The exact 2x2 determinant `a * d - b * c`.
+	det2 : F64, F64, F64, F64 -> List(F64)
+	det2 = |a, b, c, d| {
+		(hi1, lo1) = S2Exact.two_product(a, d)
+		(hi2, lo2) = S2Exact.two_product(b, c)
+		S2Exact.add([lo1, hi1], [-lo2, -hi2])
+	}
+
+	## The exact cross product of two vectors of expansions.
+	cross_exact : (List(F64), List(F64), List(F64)), (List(F64), List(F64), List(F64)) -> (List(F64), List(F64), List(F64))
+	cross_exact = |(a0, a1, a2), (b0, b1, b2)| (
+		S2Exact.sub(S2Exact.mul(a1, b2), S2Exact.mul(a2, b1)),
+		S2Exact.sub(S2Exact.mul(a2, b0), S2Exact.mul(a0, b2)),
+		S2Exact.sub(S2Exact.mul(a0, b1), S2Exact.mul(a1, b0)),
+	)
+
+	## The exact dot product of two vectors of expansions.
+	dot_exact : (List(F64), List(F64), List(F64)), (List(F64), List(F64), List(F64)) -> List(F64)
+	dot_exact = |(a0, a1, a2), (b0, b1, b2)|
+		S2Exact.mul(a0, b0)
+			|> S2Exact.add(S2Exact.mul(a1, b1))
+			|> S2Exact.add(S2Exact.mul(a2, b2))
+
+	## A vector of doubles as a vector of expansions.
+	vector : (F64, F64, F64) -> (List(F64), List(F64), List(F64))
+	vector = |(x, y, z)| (S2Exact.from_f64(x), S2Exact.from_f64(y), S2Exact.from_f64(z))
+
+	## The exact dot product of two vectors of doubles.
+	dot : (F64, F64, F64), (F64, F64, F64) -> List(F64)
+	dot = |a, b| S2Exact.dot_exact(S2Exact.vector(a), S2Exact.vector(b))
+
+	## The exact squared length of a vector of expansions.
+	norm2_exact : (List(F64), List(F64), List(F64)) -> List(F64)
+	norm2_exact = |v| S2Exact.dot_exact(v, v)
+
+	## The value of an expansion rounded to the nearest double, with ties to
+	## the even neighbour, as upstream's `ExactFloat` conversion rounds.
+	##
+	## A first estimate sums the components. The exact remainder then decides
+	## whether a neighbour of that estimate is nearer, and the step repeats
+	## until no neighbour is. The estimate is within a few units in the last
+	## place, so the loop stops after a few steps.
+	to_f64 : List(F64) -> F64
+	to_f64 = |expansion| {
+		sign = S2Exact.sign_of(expansion)
+		if sign == 0 {
+			return 0.0
+		}
+		# Work with a positive value; the neighbours of a positive double are
+		# the next bit patterns.
+		positive = if (sign < 0) S2Exact.negate(expansion) else expansion
+		var $estimate = positive.fold(0.0, |acc, t| acc + t)
+		var $steps = 0.U64
+		while $steps < 64 {
+			$steps = $steps + 1
+			remainder = S2Exact.grow(positive, $estimate.negate())
+			above = S2Exact.sign_of(remainder)
+			if above == 0 {
+				break
+			}
+			neighbour =
+				if above > 0 {
+					F64.from_bits($estimate.to_bits() + 1)
+				} else {
+					F64.from_bits($estimate.to_bits() - 1)
+				}
+			# Half the gap to the neighbour, which is exact.
+			half_gap = 0.5 * (neighbour - $estimate)
+			beyond = S2Exact.sign_of(S2Exact.grow(remainder, -half_gap)) * above
+			if beyond > 0 {
+				$estimate = neighbour
+			} else if beyond == 0 and $estimate.to_bits() % 2 == 1 {
+				# A tie goes to the even neighbour.
+				$estimate = neighbour
+				break
+			} else {
+				break
+			}
+		}
+		if (sign < 0) $estimate.negate() else $estimate
+	}
+
+	## The expansion multiplied by `2^n`, which is exact while nothing
+	## overflows or underflows.
+	scale_by_power_of_two : List(F64), I32 -> List(F64)
+	scale_by_power_of_two = |expansion, n| {
+		var $out = expansion
+		var $left = n
+		while $left != 0 {
+			step = $left.max(-600).min(600)
+			factor = power_of_two(step)
+			$out = $out.map(|t| t * factor)
+			$left = $left - step
+		}
+		$out
+	}
+}
+
+## `2^n` for `n` in `[-600, 600]`.
+power_of_two : I32 -> F64
+power_of_two = |n| {
+	two : F64
+	two = 2.0
+	if n >= 0 {
+		two.pow(n.to_f64())
+	} else {
+		1.0 / two.pow((-n).to_f64())
+	}
 }
 
 expect S2Exact.two_sum(1.0, 1e-20) == (1.0, 1e-20)
@@ -181,3 +319,25 @@ expect S2Exact.det2_sign(0.32677721703340623, -0.604824612593132, 0.326777217033
 expect S2Exact.det2_sign(0.7219546678013288, 0.5260949552878555, 0.7219546678013289, 0.5260949552878557) == 1
 expect S2Exact.det2_sign(0.5980446657127914, 0.6959116725577938, 0.5980446657127915, 0.695911672557794) == -1
 expect S2Exact.det2_sign(0.9525510241450761, 0.7034237480599241, 0.9525510241450762, 0.7034237480599242) == 1
+
+# to_f64 rounds to the nearest double, with ties to the even neighbour. 1 +
+# 2^-53 is halfway between 1 and 1 + 2^-52, and 1 + 3 * 2^-53 is halfway
+# between 1 + 2^-52 and 1 + 2^-51.
+expect S2Exact.to_f64([1.1102230246251565e-16, 1.0]) == 1.0
+expect S2Exact.to_f64([1.1102230246251565e-16, 1.0000000000000002]) == 1.0000000000000004
+expect S2Exact.to_f64([5.551115123125783e-17, 1.0]) == 1.0
+expect S2Exact.to_f64([-1e-30, -1.1102230246251565e-16, -1.0]) == -1.0000000000000002
+expect S2Exact.to_f64([]) == 0.0
+
+# (2^27 + 1)^2 = 2^54 + 2^28 + 1. The nearest double drops the 1, and the
+# exact square keeps it.
+expect {
+	square = S2Exact.square([134217729.0])
+	S2Exact.to_f64(square) == 18014398777917440.0
+		and S2Exact.sign_of(S2Exact.sub(square, [18014398777917440.0])) == 1
+}
+expect S2Exact.to_f64(S2Exact.mul([0.5, 3.0], [-2.0])) == -7.0
+expect S2Exact.scale_by_power_of_two([3.0], -2) == [0.75]
+# A shift larger than one step goes in several steps.
+expect S2Exact.scale_by_power_of_two([1.0], 1000) == [1.0715086071862673e301]
+expect S2Exact.sign_of(S2Exact.dot_exact(S2Exact.cross((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)), S2Exact.vector((1.0, 2.0, 3.0)))) == 0

@@ -5,6 +5,7 @@ import /S2Cell
 import /S2Edge
 import /S2LatLng
 import /S2LatLngRect
+import /S2LatLngRectBounder
 import /S2Point
 import /S2Predicates
 import /Internal/S2Math
@@ -615,9 +616,9 @@ S2Boundary := [].{
 
 	## The bounding rectangle of the loop's edges, not just its vertices.
 	##
-	## A geodesic edge bulges polewards of its endpoints, so each edge's own
-	## maximum latitude is included when it falls inside that edge. A loop
-	## containing a pole gets the full range of longitudes.
+	## A geodesic edge bulges polewards of its endpoints, which
+	## `S2LatLngRectBounder` accounts for. A loop containing a pole gets the
+	## full range of longitudes there. This is upstream's `S2Loop::InitBound`.
 	compute_bound : List(S2Point), Bool -> S2LatLngRect
 	compute_bound = |points, origin_inside| {
 		n = points.len()
@@ -632,66 +633,29 @@ S2Boundary := [].{
 			}
 		}
 
-		var $bound = S2LatLngRect.empty()
-		var $i = 0
-		while $i < n {
-			a = points.get($i) ?? S2Point.zero()
-			b = points.get(($i + 1) % n) ?? S2Point.zero()
-			$bound = $bound.union(S2Boundary.edge_bound(a, b))
-			$i = $i + 1
-		}
-
-		# Rounding in the trigonometry above can shave the true bound.
-		padded = $bound.expanded(S2Boundary.bound_margin())
-		north = S2Boundary.contains_pole(points, origin_inside, Bool.True)
-		south = S2Boundary.contains_pole(points, origin_inside, Bool.False)
-		# A loop that reaches a pole covers every longitude there, and one
-		# that reaches both covers every latitude between them as well.
-		if north and south {
-			S2LatLngRect.full()
-		} else if north {
-			S2LatLngRect.new(
-				R1Interval.new(padded.lat().lo(), 0.5 * F64.pi),
-				S1Interval.full(),
-			)
-		} else if south {
-			S2LatLngRect.new(
-				R1Interval.new(-0.5 * F64.pi, padded.lat().hi()),
-				S1Interval.full(),
-			)
+		# The first vertex is added again at the end to close the loop.
+		closed = points.append(points.get(0) ?? S2Point.zero())
+		edges = closed.fold(S2LatLngRectBounder.new(), |acc, p| acc.add_point(p)).bound()
+		with_north =
+			if S2Boundary.contains_pole(points, origin_inside, Bool.True) {
+				S2LatLngRect.new(R1Interval.new(edges.lat().lo(), 0.5 * F64.pi), S1Interval.full())
+			} else {
+				edges
+			}
+		# A loop that contains the south pole either wraps around the sphere
+		# or also contains the north pole, so its longitude is full either
+		# way.
+		if with_north.lng().is_full() and S2Boundary.contains_pole(points, origin_inside, Bool.False) {
+			S2LatLngRect.new(R1Interval.new(-0.5 * F64.pi, with_north.lat().hi()), with_north.lng())
 		} else {
-			padded
+			with_north
 		}
 	}
 
 	## The bounding rectangle of an open chain of edges: every vertex, and
 	## the poleward bulge of every edge between them.
-	##
-	## Like upstream's `S2LatLngRectBounder`, the result is padded against
-	## rounding and closed at the poles.
 	chain_bound : List(S2Point) -> S2LatLngRect
-	chain_bound = |points| {
-		var $bound = S2LatLngRect.empty()
-		for v in points {
-			$bound = $bound.add_point(v)
-		}
-		var $i = 1
-		while $i < points.len() {
-			a = points.get($i - 1) ?? S2Point.zero()
-			b = points.get($i) ?? S2Point.zero()
-			$bound = $bound.union(S2Boundary.edge_bound(a, b))
-			$i = $i + 1
-		}
-		$bound.expanded(S2Boundary.bound_margin()).polar_closure()
-	}
-
-	## The padding every edge bound gets, since rounding in the trigonometry
-	## can shave the true bound.
-	bound_margin : () -> S2LatLng
-	bound_margin = || {
-		margin = S1Angle.from_radians(2.0e-15).radians()
-		S2LatLng.from_radians(margin, margin)
-	}
+	chain_bound = |points| points.fold(S2LatLngRectBounder.new(), |acc, p| acc.add_point(p)).bound()
 
 	## True when the loop contains the north or the south pole.
 	contains_pole : List(S2Point), Bool, Bool -> Bool
@@ -705,44 +669,13 @@ S2Boundary := [].{
 			},
 			origin_inside,
 		)
-
-	## The bounding rectangle of a single geodesic edge.
-	edge_bound : S2Point, S2Point -> S2LatLngRect
-	edge_bound = |a, b| {
-		a_ll = S2LatLng.from_point(a)
-		b_ll = S2LatLng.from_point(b)
-		var $lat = R1Interval.from_point_pair(a_ll.lat_radians(), b_ll.lat_radians())
-		lng = S1Interval.from_point_pair(a_ll.lng_radians(), b_ll.lng_radians())
-
-		# The extreme latitudes of the edge's great circle are where the
-		# +z direction projects into the circle's plane.
-		n = a.robust_cross(b).normalize()
-		horizontal = S2Point.new(-n.z() * n.x(), -n.z() * n.y(), 1.0 - n.z() * n.z())
-		if horizontal.norm2() > 0.0 {
-			peak = horizontal.normalize()
-			for candidate in [peak, -peak] {
-				if S2Boundary.on_edge(a, b, candidate) {
-					$lat = $lat.add_point(S2LatLng.latitude(candidate).radians())
-				}
-			}
-		}
-		S2LatLngRect.new($lat, lng)
-	}
-
-	## True when `c`, already on the edge's great circle, lies within the arc
-	## from `a` to `b`.
-	on_edge : S2Point, S2Point, S2Point -> Bool
-	on_edge = |a, b, c| {
-		n = a.cross(b)
-		a.cross(c).dot(n) >= 0.0 and c.cross(b).dot(n) >= 0.0
-	}
 }
 
 expect {
 	# An edge along the 10th parallel bulges north of it between its ends.
 	a = S2LatLng.from_degrees(10.0, -20.0).to_point()
 	b = S2LatLng.from_degrees(10.0, 20.0).to_point()
-	S2Boundary.edge_bound(a, b).lat_hi().degrees() > 10.5
+	S2Boundary.chain_bound([a, b]).lat_hi().degrees() > 10.5
 		and S2Boundary.chain_bound([a, b]).contains_point(S2Edge.interpolate(a, b, 0.5))
 }
 expect S2Boundary.chain_bound([]).is_empty()

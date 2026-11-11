@@ -32,7 +32,8 @@
 // neighbour of the leaf at face 0, i = 0, j = 1073741823, which upstream
 // computes as FromFaceIJSame(0, -1, j, false).parent(30).
 //
-// Scalar functions (A, B, C are points written as three numbers):
+// Scalar functions (A, B, C are points written as three numbers, or in one
+// of the two forms that "Point" below describes):
 //
 //   angle_trig RADIANS                sin cos tan of S1Angle, then SinCos()
 //   angle_unsigned e6|e7 U            radians of S1Angle::UnsignedE6/E7(U)
@@ -79,6 +80,66 @@
 //   union_verbatim N ID_1 ... ID_N    FromVerbatim, then IsValid IsNormalized
 //
 // The last three print the ids of the union.
+//
+// Edges and predicates (L is a squared chord length, R radians, booleans
+// print as 0 or 1):
+//
+//   edge_distance X A B               GetDistance, then the S1ChordAngle
+//                                     length2 that AlwaysUpdateMinDistance gives
+//   edge_update L min|max|interior X A B   flag and length2 after the update
+//   edge_less X A B L                 IsDistanceLess IsInteriorDistanceLess
+//   edge_min_error L                  GetUpdateMinDistanceMaxError
+//   edge_fraction X A B               GetDistanceFraction
+//   edge_project X A B                Project (also Project with a_cross_b
+//                                     = RobustCrossProd(A, B), as 6 numbers)
+//   edge_point line|left|right|ray A B R    the S1Angle and S1ChordAngle(R)
+//                                     forms, as 6 numbers
+//   edge_interpolate A B T            Interpolate
+//   edge_pair min|max L A0 A1 B0 B1   flag and length2 after the update
+//   edge_pair_less A0 A1 B0 B1 L      IsEdgePairDistanceLess
+//   edge_pair_closest A0 A1 B0 B1     GetEdgePairClosestPoints, 6 numbers
+//   edge_near A0 A1 B0 B1 R           IsEdgeBNearEdgeA
+//   edge_cross A B C D                CrossingSign VertexCrossing
+//                                     SignedVertexCrossing EdgeOrVertexCrossing
+//                                     (the vertex ones only when two of the
+//                                     points are equal, else 9)
+//   edge_intersection A0 A1 B0 B1     GetIntersection, then the method it
+//                                     used (2 stable, 4 exact)
+//   crosser A B C N D_1 ... D_N       per D: CrossingSign EdgeOrVertexCrossing
+//                                     SignedEdgeOrVertexCrossing
+//                                     last_interior_crossing_sign, each from its
+//                                     own S2EdgeCrosser walking the chain
+//   pred_distances X A B              CompareDistances
+//   pred_distance X Y L               CompareDistance
+//   pred_dot A B                      SignDotProd
+//   pred_edge_distance X A0 A1 L      CompareEdgeDistance
+//   pred_edge_pair A0 A1 B0 B1 L      CompareEdgePairDistance
+//   pred_directions A0 A1 B0 B1       CompareEdgeDirections
+//
+// Padded cells, cell distances, rectangles and the rectangle bounder (a
+// rectangle RECT is LAT_LO LAT_HI LNG_LO LNG_HI in radians, passed to the
+// R1Interval and S1Interval constructors):
+//
+//   padded ID PAD                     id level bound middle center entry exit
+//   padded_child ID PAD I J           the same for S2PaddedCell(parent, I, J)
+//   padded_child_ij ID PAD            GetChildIJ for pos 0..3, 8 integers
+//   padded_shrink ID PAD U0 U1 V0 V1  ShrinkToFit
+//   cell_dist_point ID P              GetDistance GetBoundaryDistance
+//                                     GetMaxDistance, as length2
+//   cell_dist_edge ID A B             GetDistance(A, B) GetMaxDistance(A, B)
+//   cell_dist_cell ID1 ID2 L          GetDistance GetMaxDistance, then
+//                                     IsDistanceLess IsDistanceLessOrEqual
+//                                     IsMaxDistanceLess IsMaxDistanceLessOrEqual
+//   rect_centroid RECT                GetCentroid
+//   rect_boundary RECT V0 V1          BoundaryIntersects
+//   rect_expand RECT R                ExpandedByDistance, as a RECT
+//   rect_distance RECT RECT           GetDistance GetDirectedHausdorffDistance
+//                                     GetHausdorffDistance, in radians
+//   rect_distance_ll RECT LAT LNG     GetDistance(S2LatLng::FromRadians)
+//   bounder N P_1 ... P_N             GetBound after AddPoint of each point
+//   bounder_ll N LAT_1 LNG_1 ...      GetBound after AddLatLng (radians)
+//   bounder_sub RECT                  ExpandForSubregions
+//   bounder_error                     MaxErrorForTests, lat and lng radians
 
 #include <cmath>
 #include <cstdint>
@@ -98,8 +159,16 @@
 #include "s2/s2centroids.h"
 #include "s2/s2coords.h"
 #include "s2/s2earth.h"
+#include "s2/s2edge_crosser.h"
+#include "s2/s2edge_crossings.h"
+#include "s2/s2edge_crossings_internal.h"
+#include "s2/s2edge_distances.h"
+#include "s2/s2cell.h"
 #include "s2/s2latlng.h"
 #include "s2/s2latlng_rect.h"
+#include "s2/s2latlng_rect_bounder.h"
+#include "s2/s2padded_cell.h"
+#include "s2/s2predicates.h"
 #include "s2/s2measures.h"
 #include "s2/s2metrics.h"
 #include "s2/s2point.h"
@@ -140,8 +209,21 @@ double Number(std::istringstream& in) {
   return std::strtod(text.c_str(), nullptr);
 }
 
+// A point is three numbers. "N X Y Z" is S2Point(X, Y, Z).Normalize(), and
+// "L LAT LNG" is S2LatLng::FromDegrees(LAT, LNG).ToPoint().
 S2Point Point(std::istringstream& in) {
-  double x = Number(in), y = Number(in), z = Number(in);
+  std::string text;
+  in >> text;
+  if (text == "N") {
+    double x = Number(in), y = Number(in), z = Number(in);
+    return S2Point(x, y, z).Normalize();
+  }
+  if (text == "L") {
+    double lat = Number(in), lng = Number(in);
+    return S2LatLng::FromDegrees(lat, lng).ToPoint();
+  }
+  double x = std::strtod(text.c_str(), nullptr);
+  double y = Number(in), z = Number(in);
   return S2Point(x, y, z);
 }
 
@@ -175,6 +257,257 @@ void PrintUnion(const S2CellUnion& u) {
 int Fail(const std::string& kind) {
   std::fprintf(stderr, "unknown case: %s\n", kind.c_str());
   return 1;
+}
+
+
+S2LatLngRect Rect(std::istringstream& in) {
+  double a = Number(in), b = Number(in), c = Number(in), d = Number(in);
+  return S2LatLngRect(R1Interval(a, b), S1Interval(c, d));
+}
+
+void PrintLatLngRect(const S2LatLngRect& r) {
+  Print({r.lat().lo(), r.lat().hi(), r.lng().lo(), r.lng().hi()});
+}
+
+void PrintPadded(const S2PaddedCell& p) {
+  std::printf("%llu %d ", static_cast<unsigned long long>(p.id().id()),
+              p.level());
+  const R2Rect& b = p.bound();
+  const R2Rect& m = p.middle();
+  S2Point c = p.GetCenter(), e = p.GetEntryVertex(), x = p.GetExitVertex();
+  Print({b[0][0], b[0][1], b[1][0], b[1][1], m[0][0], m[0][1], m[1][0],
+         m[1][1], c.x(), c.y(), c.z(), e.x(), e.y(), e.z(), x.x(), x.y(),
+         x.z()});
+}
+
+int Answer(const std::string& kind, std::istringstream& in) {
+  if (kind == "edge_distance") {
+    S2Point x = Point(in), a = Point(in), b = Point(in);
+    S1ChordAngle d = S1ChordAngle::Infinity();
+    S2::UpdateMinDistance(x, a, b, &d);
+    Print({S2::GetDistance(x, a, b).radians(), d.length2()});
+  } else if (kind == "edge_update") {
+    double l = Number(in);
+    std::string op;
+    in >> op;
+    S2Point x = Point(in), a = Point(in), b = Point(in);
+    S1ChordAngle d = S1ChordAngle::FromLength2(l);
+    bool f;
+    if (op == "min") f = S2::UpdateMinDistance(x, a, b, &d);
+    else if (op == "max") f = S2::UpdateMaxDistance(x, a, b, &d);
+    else if (op == "interior") f = S2::UpdateMinInteriorDistance(x, a, b, &d);
+    else return Fail(kind + " " + op);
+    Print({f ? 1.0 : 0.0, d.length2()});
+  } else if (kind == "edge_less") {
+    S2Point x = Point(in), a = Point(in), b = Point(in);
+    S1ChordAngle l = S1ChordAngle::FromLength2(Number(in));
+    std::printf("%d %d\n", S2::IsDistanceLess(x, a, b, l) ? 1 : 0,
+                S2::IsInteriorDistanceLess(x, a, b, l) ? 1 : 0);
+  } else if (kind == "edge_min_error") {
+    Print({S2::GetUpdateMinDistanceMaxError(
+        S1ChordAngle::FromLength2(Number(in)))});
+  } else if (kind == "edge_fraction") {
+    S2Point x = Point(in), a = Point(in), b = Point(in);
+    Print({S2::GetDistanceFraction(x, a, b)});
+  } else if (kind == "edge_project") {
+    S2Point x = Point(in), a = Point(in), b = Point(in);
+    S2Point p = S2::Project(x, a, b);
+    S2Point q = S2::Project(x, a, b, S2::RobustCrossProd(a, b));
+    Print({p.x(), p.y(), p.z(), q.x(), q.y(), q.z()});
+  } else if (kind == "edge_point") {
+    std::string op;
+    in >> op;
+    S2Point a = Point(in), b = Point(in);
+    double r = Number(in);
+    S1Angle angle = S1Angle::Radians(r);
+    S1ChordAngle chord(angle);
+    S2Point p, q;
+    if (op == "line") {
+      p = S2::GetPointOnLine(a, b, angle);
+      q = S2::GetPointOnLine(a, b, chord);
+    } else if (op == "left") {
+      p = S2::GetPointToLeft(a, b, angle);
+      q = S2::GetPointToLeft(a, b, chord);
+    } else if (op == "right") {
+      p = S2::GetPointToRight(a, b, angle);
+      q = S2::GetPointToRight(a, b, chord);
+    } else if (op == "ray") {
+      p = S2::GetPointOnRay(a, b, angle);
+      q = S2::GetPointOnRay(a, b, chord);
+    } else {
+      return Fail(kind + " " + op);
+    }
+    Print({p.x(), p.y(), p.z(), q.x(), q.y(), q.z()});
+  } else if (kind == "edge_interpolate") {
+    S2Point a = Point(in), b = Point(in);
+    PrintPoint(S2::Interpolate(a, b, Number(in)));
+  } else if (kind == "edge_pair") {
+    std::string op;
+    in >> op;
+    S1ChordAngle d = S1ChordAngle::FromLength2(Number(in));
+    S2Point a0 = Point(in), a1 = Point(in), b0 = Point(in), b1 = Point(in);
+    bool f;
+    if (op == "min") f = S2::UpdateEdgePairMinDistance(a0, a1, b0, b1, &d);
+    else if (op == "max") f = S2::UpdateEdgePairMaxDistance(a0, a1, b0, b1, &d);
+    else return Fail(kind + " " + op);
+    Print({f ? 1.0 : 0.0, d.length2()});
+  } else if (kind == "edge_pair_less") {
+    S2Point a0 = Point(in), a1 = Point(in), b0 = Point(in), b1 = Point(in);
+    S1ChordAngle l = S1ChordAngle::FromLength2(Number(in));
+    std::printf("%d\n", S2::IsEdgePairDistanceLess(a0, a1, b0, b1, l) ? 1 : 0);
+  } else if (kind == "edge_pair_closest") {
+    S2Point a0 = Point(in), a1 = Point(in), b0 = Point(in), b1 = Point(in);
+    auto r = S2::GetEdgePairClosestPoints(a0, a1, b0, b1);
+    Print({r.first.x(), r.first.y(), r.first.z(), r.second.x(), r.second.y(),
+           r.second.z()});
+  } else if (kind == "edge_near") {
+    S2Point a0 = Point(in), a1 = Point(in), b0 = Point(in), b1 = Point(in);
+    S1Angle t = S1Angle::Radians(Number(in));
+    std::printf("%d\n", S2::IsEdgeBNearEdgeA(a0, a1, b0, b1, t) ? 1 : 0);
+  } else if (kind == "edge_cross") {
+    S2Point a = Point(in), b = Point(in), c = Point(in), d = Point(in);
+    bool shared = a == c || a == d || b == c || b == d || a == b || c == d;
+    std::printf("%d %d %d %d\n", S2::CrossingSign(a, b, c, d),
+                shared ? (S2::VertexCrossing(a, b, c, d) ? 1 : 0) : 9,
+                shared ? S2::SignedVertexCrossing(a, b, c, d) : 9,
+                S2::EdgeOrVertexCrossing(a, b, c, d) ? 1 : 0);
+  } else if (kind == "edge_intersection") {
+    S2Point a0 = Point(in), a1 = Point(in), b0 = Point(in), b1 = Point(in);
+    int tally[static_cast<int>(S2::internal::IntersectionMethod::NUM_METHODS)] =
+        {};
+    S2::internal::intersection_method_tally_ = tally;
+    S2Point x = S2::GetIntersection(a0, a1, b0, b1);
+    S2::internal::intersection_method_tally_ = nullptr;
+    int method = 0;
+    while (tally[method] == 0) ++method;
+    std::printf("%.17g %.17g %.17g %d\n", x.x(), x.y(), x.z(), method);
+  } else if (kind == "crosser") {
+    S2Point a = Point(in), b = Point(in), c = Point(in);
+    int n;
+    in >> n;
+    std::vector<S2Point> d;
+    for (int i = 0; i < n; ++i) d.push_back(Point(in));
+    S2EdgeCrosser c1(&a, &b, &c), c2(&a, &b, &c), c3(&a, &b, &c);
+    const char* separator = "";
+    for (int i = 0; i < n; ++i) {
+      int s = c1.CrossingSign(&d[i]);
+      int e = c2.EdgeOrVertexCrossing(&d[i]) ? 1 : 0;
+      int g = c3.SignedEdgeOrVertexCrossing(&d[i]);
+      std::printf("%s%d %d %d %d", separator, s, e, g,
+                  c1.last_interior_crossing_sign());
+      separator = " ";
+    }
+    std::printf("\n");
+  } else if (kind == "pred_distances") {
+    S2Point x = Point(in), a = Point(in), b = Point(in);
+    std::printf("%d\n", s2pred::CompareDistances(x, a, b));
+  } else if (kind == "pred_distance") {
+    S2Point x = Point(in), y = Point(in);
+    std::printf("%d\n", s2pred::CompareDistance(
+                            x, y, S1ChordAngle::FromLength2(Number(in))));
+  } else if (kind == "pred_dot") {
+    S2Point a = Point(in), b = Point(in);
+    std::printf("%d\n", s2pred::SignDotProd(a, b));
+  } else if (kind == "pred_edge_distance") {
+    S2Point x = Point(in), a0 = Point(in), a1 = Point(in);
+    std::printf("%d\n", s2pred::CompareEdgeDistance(
+                            x, a0, a1, S1ChordAngle::FromLength2(Number(in))));
+  } else if (kind == "pred_edge_pair") {
+    S2Point a0 = Point(in), a1 = Point(in), b0 = Point(in), b1 = Point(in);
+    std::printf("%d\n", s2pred::CompareEdgePairDistance(
+                            a0, a1, b0, b1,
+                            S1ChordAngle::FromLength2(Number(in))));
+  } else if (kind == "pred_directions") {
+    S2Point a0 = Point(in), a1 = Point(in), b0 = Point(in), b1 = Point(in);
+    std::printf("%d\n", s2pred::CompareEdgeDirections(a0, a1, b0, b1));
+  } else if (kind == "padded") {
+    S2CellId id = Id(in);
+    PrintPadded(S2PaddedCell(id, Number(in)));
+  } else if (kind == "padded_child") {
+    S2CellId id = Id(in);
+    double pad = Number(in);
+    int i, j;
+    in >> i >> j;
+    S2PaddedCell parent(id, pad);
+    PrintPadded(S2PaddedCell(parent, i, j));
+  } else if (kind == "padded_child_ij") {
+    S2CellId id = Id(in);
+    S2PaddedCell p(id, Number(in));
+    for (int pos = 0; pos < 4; ++pos) {
+      int i, j;
+      p.GetChildIJ(pos, &i, &j);
+      std::printf("%s%d %d", pos == 0 ? "" : " ", i, j);
+    }
+    std::printf("\n");
+  } else if (kind == "padded_shrink") {
+    S2CellId id = Id(in);
+    S2PaddedCell p(id, Number(in));
+    double u0 = Number(in), u1 = Number(in), v0 = Number(in), v1 = Number(in);
+    std::printf("%llu\n", static_cast<unsigned long long>(
+                              p.ShrinkToFit(R2Rect(R1Interval(u0, u1),
+                                                   R1Interval(v0, v1)))
+                                  .id()));
+  } else if (kind == "cell_dist_point") {
+    S2Cell cell(Id(in));
+    S2Point p = Point(in);
+    Print({cell.GetDistance(p).length2(), cell.GetBoundaryDistance(p).length2(),
+           cell.GetMaxDistance(p).length2()});
+  } else if (kind == "cell_dist_edge") {
+    S2Cell cell(Id(in));
+    S2Point a = Point(in), b = Point(in);
+    Print({cell.GetDistance(a, b).length2(),
+           cell.GetMaxDistance(a, b).length2()});
+  } else if (kind == "cell_dist_cell") {
+    S2Cell c1(Id(in));
+    S2Cell c2(Id(in));
+    S1ChordAngle l = S1ChordAngle::FromLength2(Number(in));
+    std::printf("%.17g %.17g %d %d %d %d\n", c1.GetDistance(c2).length2(),
+                c1.GetMaxDistance(c2).length2(),
+                c1.IsDistanceLess(c2, l) ? 1 : 0,
+                c1.IsDistanceLessOrEqual(c2, l) ? 1 : 0,
+                c1.IsMaxDistanceLess(c2, l) ? 1 : 0,
+                c1.IsMaxDistanceLessOrEqual(c2, l) ? 1 : 0);
+  } else if (kind == "rect_centroid") {
+    PrintPoint(Rect(in).GetCentroid());
+  } else if (kind == "rect_boundary") {
+    S2LatLngRect r = Rect(in);
+    S2Point v0 = Point(in), v1 = Point(in);
+    std::printf("%d\n", r.BoundaryIntersects(v0, v1) ? 1 : 0);
+  } else if (kind == "rect_expand") {
+    S2LatLngRect r = Rect(in);
+    PrintLatLngRect(r.ExpandedByDistance(S1Angle::Radians(Number(in))));
+  } else if (kind == "rect_distance") {
+    S2LatLngRect a = Rect(in);
+    S2LatLngRect b = Rect(in);
+    Print({a.GetDistance(b).radians(),
+           a.GetDirectedHausdorffDistance(b).radians(),
+           a.GetHausdorffDistance(b).radians()});
+  } else if (kind == "rect_distance_ll") {
+    S2LatLngRect a = Rect(in);
+    double lat = Number(in), lng = Number(in);
+    Print({a.GetDistance(S2LatLng::FromRadians(lat, lng)).radians()});
+  } else if (kind == "bounder" || kind == "bounder_ll") {
+    int n;
+    in >> n;
+    S2LatLngRectBounder bounder;
+    for (int i = 0; i < n; ++i) {
+      if (kind == "bounder") {
+        bounder.AddPoint(Point(in));
+      } else {
+        double lat = Number(in), lng = Number(in);
+        bounder.AddLatLng(S2LatLng::FromRadians(lat, lng));
+      }
+    }
+    PrintLatLngRect(bounder.GetBound());
+  } else if (kind == "bounder_sub") {
+    PrintLatLngRect(S2LatLngRectBounder::ExpandForSubregions(Rect(in)));
+  } else if (kind == "bounder_error") {
+    S2LatLng e = S2LatLngRectBounder::MaxErrorForTests();
+    Print({e.lat().radians(), e.lng().radians()});
+  } else {
+    return Fail(kind);
+  }
+  return 0;
 }
 
 }  // namespace
@@ -400,8 +733,8 @@ int main() {
       S2CellUnion u = S2CellUnion::FromVerbatim(std::move(ids));
       PrintIds(u.cell_ids());
       std::printf(" | %d %d\n", u.IsValid() ? 1 : 0, u.IsNormalized() ? 1 : 0);
-    } else {
-      return Fail(kind);
+    } else if (Answer(kind, in) != 0) {
+      return 1;
     }
   }
   return 0;

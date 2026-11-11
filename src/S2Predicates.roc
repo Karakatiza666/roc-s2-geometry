@@ -1,4 +1,5 @@
 import Internal/S2Exact
+import S1ChordAngle
 import S2Point
 
 ## Robust geometric predicates: tests whose answers are exact, not merely
@@ -186,6 +187,150 @@ S2Predicates := [].{
 		$sum >= 2
 	}
 
+	## Compares the distances from `x` to `a` and from `x` to `b`: `-1` when
+	## `a` is closer, `1` when `b` is closer, and `0` only when `a == b`.
+	##
+	## The distances are measured as though every point lay exactly on the
+	## unit sphere. Equal distances are broken by a symbolic perturbation, so
+	## the results are consistent: if `ab < bc` and `bc < ac`, then `ab < ac`.
+	##
+	## Like `sign`, the test escalates from rounded arithmetic with an error
+	## bound to exact arithmetic. Upstream tries `long double` precision
+	## between those two steps; this port goes straight to exact arithmetic,
+	## which gives the same answers.
+	compare_distances : S2Point, S2Point, S2Point -> I8
+	compare_distances = |x, a, b| {
+		triaged = triage_compare_cos_distances(x, a, b)
+		if triaged != 0 {
+			return triaged
+		}
+		if a == b {
+			return 0
+		}
+		# sin^2 is the more accurate measure near 0 and 180 degrees, cos near
+		# 90 degrees. The test above failed, so the two angles are nearly
+		# equal and one of them is enough to choose.
+		cos_ax = a.dot(x)
+		sin2 =
+			if cos_ax > sqrt1_2 {
+				triage_compare_sin2_distances(x, a, b)
+			} else if cos_ax < -sqrt1_2 {
+				-triage_compare_sin2_distances(x, a, b)
+			} else {
+				0
+			}
+		if sin2 != 0 {
+			return sin2
+		}
+		exact = exact_compare_distances(x, a, b)
+		if exact != 0 {
+			return exact
+		}
+		# Symbolic perturbation: the smaller point stands on the higher
+		# pedestal, so it is further away.
+		if a < b {
+			1
+		} else if a > b {
+			-1
+		} else {
+			0
+		}
+	}
+
+	## Compares the distance from `x` to `y` with `r`: `-1` when it is less,
+	## `0` when it is equal, and `1` when it is greater.
+	##
+	## The points are treated as though they lay exactly on the unit sphere.
+	## There is no symbolic perturbation, so `0` is a possible answer.
+	compare_distance : S2Point, S2Point, S1ChordAngle -> I8
+	compare_distance = |x, y, r| {
+		r2 = r.length2()
+		triaged = triage_compare_cos_distance(x, y, r2)
+		if triaged != 0 {
+			return triaged
+		}
+		if r2 == 0.0 and x == y {
+			return 0
+		}
+		# Near 180 degrees the chord angle itself has a rounding error of
+		# about 2e-8 radians, so the sin^2 test is only worth trying for
+		# small limits.
+		sin2 = if (r2 < k45_degrees_length2) triage_compare_sin2_distance(x, y, r2) else 0
+		if sin2 != 0 {
+			return sin2
+		}
+		exact_compare_distance(x, y, r2)
+	}
+
+	## The exact sign of the dot product of `a` and `b`: `1`, `-1`, or `0`.
+	##
+	## Requires `a.norm2() <= 2` and `b.norm2() <= 2`, so that the edge
+	## normals of a cell, which are not unit length, are allowed.
+	sign_dot_prod : S2Point, S2Point -> I8
+	sign_dot_prod = |a, b| {
+		# The rounded dot product of vectors no longer than sqrt(2) is within
+		# 3.03 epsilon of the true one (Rump 2011), rounded up to a value that
+		# is exact in binary.
+		dot = a.dot(b)
+		if dot.abs() > 3.046875 * f64_epsilon {
+			if (dot > 0.0) 1 else -1
+		} else {
+			S2Exact.sign_of(S2Exact.dot(coords(a), coords(b)))
+		}
+	}
+
+	## Compares the distance from `x` to the edge `a0a1` with `r`: `-1` when
+	## it is less, `0` when it is equal, and `1` when it is greater.
+	##
+	## The points are treated as though they lay exactly on the unit sphere.
+	## Requires that `a0` and `a1` are not antipodal.
+	compare_edge_distance : S2Point, S2Point, S2Point, S1ChordAngle -> I8
+	compare_edge_distance = |x, a0, a1, r| {
+		triaged = triage_compare_edge_distance(x, a0, a1, r.length2())
+		if triaged != 0 {
+			return triaged
+		}
+		if a0 == a1 {
+			return S2Predicates.compare_distance(x, a0, r)
+		}
+		exact_compare_edge_distance(x, a0, a1, r)
+	}
+
+	## The sign of the dot product of the normals of the edges `a0a1` and
+	## `b0b1`: `1` when the edges run in roughly the same direction around the
+	## sphere, `-1` when they run in roughly opposite directions, and `0` when
+	## they are exactly perpendicular.
+	##
+	## The answer is exact. There is no symbolic perturbation, so a
+	## degenerate edge, or one whose endpoints are exactly proportional,
+	## gives `0`. Requires that neither edge has antipodal endpoints.
+	compare_edge_directions : S2Point, S2Point, S2Point, S2Point -> I8
+	compare_edge_directions = |a0, a1, b0, b1| {
+		na = (a0 - a1).cross(a0 + a1)
+		nb = (b0 - b1).cross(b0 + b1)
+		na_len = na.norm()
+		nb_len = nb.norm()
+		cos_ab = na.dot(nb)
+		cos_ab_error =
+			((5.0 + 4.0 * sqrt3) * na_len * nb_len + 32.0 * sqrt3 * dbl_err * (na_len + nb_len))
+				* dbl_err
+		if cos_ab > cos_ab_error {
+			return 1
+		}
+		if cos_ab < -cos_ab_error {
+			return -1
+		}
+		if a0 == a1 or b0 == b1 {
+			return 0
+		}
+		S2Exact.sign_of(
+			S2Exact.dot_exact(
+				S2Exact.cross(coords(a0), coords(a1)),
+				S2Exact.cross(coords(b0), coords(b1)),
+			),
+		)
+	}
+
 	## Sorts three points lexicographically, reporting the sign of the
 	## permutation alongside them.
 	sort3 : S2Point, S2Point, S2Point -> ((S2Point, S2Point, S2Point), I8)
@@ -312,6 +457,152 @@ expect {
 	S2Predicates.angle_contains_vertex(a, b, a) == Bool.False
 }
 
+# The cases of upstream's CompareDistances.Coverage test, with the
+# arguments swapped as well. Upstream records the precision each case needs;
+# the cases marked "long double", "exact" and "symbolic" are those that
+# rounded arithmetic cannot decide.
+# Double.
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 1.0).normalize(), S2Point.new(1.0, 0.999999999999999, 1.0).normalize(), S2Point.new(1.0, 1.0, 1.000000000000002).normalize()) == -1
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 1.0).normalize(), S2Point.new(1.0, 1.0, 1.000000000000002).normalize(), S2Point.new(1.0, 0.999999999999999, 1.0).normalize()) == 1
+# Double.
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(1.0, 0.999999999999999, 1.0e-21).normalize(), S2Point.new(1.0, 0.999999999999999, 0.0).normalize()) == 1
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(1.0, 0.999999999999999, 0.0).normalize(), S2Point.new(1.0, 0.999999999999999, 1.0e-21).normalize()) == -1
+# Long double.
+expect S2Predicates.compare_distances(S2Point.new(2.0, 0.0, 0.0).normalize(), S2Point.new(2.0, -1.0, 0.0).normalize(), S2Point.new(2.0, 1.0, 1.0e-08).normalize()) == -1
+expect S2Predicates.compare_distances(S2Point.new(2.0, 0.0, 0.0).normalize(), S2Point.new(2.0, 1.0, 1.0e-08).normalize(), S2Point.new(2.0, -1.0, 0.0).normalize()) == 1
+# Exact.
+expect S2Predicates.compare_distances(S2Point.new(2.0, 0.0, 0.0).normalize(), S2Point.new(2.0, -1.0, 0.0).normalize(), S2Point.new(2.0, 1.0, 1.0e-100).normalize()) == -1
+expect S2Predicates.compare_distances(S2Point.new(2.0, 0.0, 0.0).normalize(), S2Point.new(2.0, 1.0, 1.0e-100).normalize(), S2Point.new(2.0, -1.0, 0.0).normalize()) == 1
+# Symbolic.
+expect S2Predicates.compare_distances(S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, -1.0, 0.0).normalize(), S2Point.new(1.0, 1.0, 0.0).normalize()) == 1
+expect S2Predicates.compare_distances(S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(1.0, -1.0, 0.0).normalize()) == -1
+# Symbolic.
+expect S2Predicates.compare_distances(S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 0.0, 0.0)) == 0
+expect S2Predicates.compare_distances(S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 0.0, 0.0)) == 0
+# Double.
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 1.0).normalize(), S2Point.new(1.0, -1.0, 0.0).normalize(), S2Point.new(-1.0, 1.0, 3.0e-15).normalize()) == 1
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 1.0).normalize(), S2Point.new(-1.0, 1.0, 3.0e-15).normalize(), S2Point.new(1.0, -1.0, 0.0).normalize()) == -1
+# Double.
+expect S2Predicates.compare_distances(S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 1.0e-30, 0.0), S2Point.new(-1.0, 1.0e-40, 0.0)) == -1
+expect S2Predicates.compare_distances(S2Point.new(1.0, 0.0, 0.0), S2Point.new(-1.0, 1.0e-40, 0.0), S2Point.new(1.0, 1.0e-30, 0.0)) == 1
+# Long double.
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 1.0).normalize(), S2Point.new(1.0, -1.0, 0.0).normalize(), S2Point.new(-1.0, 1.0, 3.0e-18).normalize()) == 1
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 1.0).normalize(), S2Point.new(-1.0, 1.0, 3.0e-18).normalize(), S2Point.new(1.0, -1.0, 0.0).normalize()) == -1
+# Exact.
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 1.0).normalize(), S2Point.new(1.0, -1.0, 0.0).normalize(), S2Point.new(-1.0, 1.0, 1.0e-100).normalize()) == 1
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 1.0).normalize(), S2Point.new(-1.0, 1.0, 1.0e-100).normalize(), S2Point.new(1.0, -1.0, 0.0).normalize()) == -1
+# Symbolic.
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 1.0).normalize(), S2Point.new(1.0, -1.0, 0.0).normalize(), S2Point.new(-1.0, 1.0, 0.0).normalize()) == -1
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 1.0).normalize(), S2Point.new(-1.0, 1.0, 0.0).normalize(), S2Point.new(1.0, -1.0, 0.0).normalize()) == 1
+# Symbolic.
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 1.0).normalize(), S2Point.new(1.0, -1.0, 0.0).normalize(), S2Point.new(1.0, -1.0, 0.0).normalize()) == 0
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 1.0).normalize(), S2Point.new(1.0, -1.0, 0.0).normalize(), S2Point.new(1.0, -1.0, 0.0).normalize()) == 0
+# Double.
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(-1.0, -0.999999999999999, 0.0).normalize(), S2Point.new(-1.0, -1.0, 0.0).normalize()) == -1
+expect S2Predicates.compare_distances(S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(-1.0, -1.0, 0.0).normalize(), S2Point.new(-1.0, -0.999999999999999, 0.0).normalize()) == 1
+# Double.
+expect S2Predicates.compare_distances(S2Point.new(-1.0, -1.0, 0.0).normalize(), S2Point.new(1.0, 0.999999999999999, 0.0).normalize(), S2Point.new(1.0, 0.999999999999999, 1.0e-21).normalize()) == 1
+expect S2Predicates.compare_distances(S2Point.new(-1.0, -1.0, 0.0).normalize(), S2Point.new(1.0, 0.999999999999999, 1.0e-21).normalize(), S2Point.new(1.0, 0.999999999999999, 0.0).normalize()) == -1
+# Long double.
+expect S2Predicates.compare_distances(S2Point.new(-1.0, -1.0, 0.0).normalize(), S2Point.new(2.0, 1.0, 0.0).normalize(), S2Point.new(2.0, 1.0, 1.0e-08).normalize()) == 1
+expect S2Predicates.compare_distances(S2Point.new(-1.0, -1.0, 0.0).normalize(), S2Point.new(2.0, 1.0, 1.0e-08).normalize(), S2Point.new(2.0, 1.0, 0.0).normalize()) == -1
+# Exact.
+expect S2Predicates.compare_distances(S2Point.new(-1.0, -1.0, 0.0).normalize(), S2Point.new(2.0, 1.0, 0.0).normalize(), S2Point.new(2.0, 1.0, 1.0e-30).normalize()) == 1
+expect S2Predicates.compare_distances(S2Point.new(-1.0, -1.0, 0.0).normalize(), S2Point.new(2.0, 1.0, 1.0e-30).normalize(), S2Point.new(2.0, 1.0, 0.0).normalize()) == -1
+# Symbolic.
+expect S2Predicates.compare_distances(S2Point.new(-1.0, -1.0, 0.0).normalize(), S2Point.new(2.0, 1.0, 0.0).normalize(), S2Point.new(1.0, 2.0, 0.0).normalize()) == -1
+expect S2Predicates.compare_distances(S2Point.new(-1.0, -1.0, 0.0).normalize(), S2Point.new(1.0, 2.0, 0.0).normalize(), S2Point.new(2.0, 1.0, 0.0).normalize()) == 1
+# The cases of upstream's CompareDistance.Coverage test.
+# Double.
+expect S2Predicates.compare_distance(S2Point.new(1.0, 1.0, 1.0).normalize(), S2Point.new(1.0, 0.999999999999999, 1.0).normalize(), S1ChordAngle.from_length2(1.0e-30)) == -1
+# Long double.
+expect S2Predicates.compare_distance(S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 1.0, 0.0).normalize(), S1ChordAngle.from_length2(0.585786437626905)) == -1
+# Exact.
+expect S2Predicates.compare_distance(S2Point.new(1.0, 1.0e-40, 0.0), S2Point.new(1.0000000000000002, 1.0e-40, 0.0), S1ChordAngle.from_length2(3.9936083326813714e-112)) == 1
+# Exact.
+expect S2Predicates.compare_distance(S2Point.new(1.0, 1.0e-40, 0.0), S2Point.new(1.0000000000000002, 1.0e-40, 0.0), S1ChordAngle.from_length2(5.965760595733903e-112)) == -1
+# Exact.
+expect S2Predicates.compare_distance(S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0000000000000002, 0.0, 0.0), S1ChordAngle.from_length2(0.0)) == 0
+# Double.
+expect S2Predicates.compare_distance(S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 1.0e-08, 0.0), S1ChordAngle.from_length2(9.99999999999999e-15)) == -1
+# Double.
+expect S2Predicates.compare_distance(S2Point.new(1.0, 0.0, 0.0), S2Point.new(-1.0, 1.0e-08, 0.0), S1ChordAngle.from_length2(3.9999999999999902)) == 1
+# Double.
+expect S2Predicates.compare_distance(S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(1.0, -1.0000000000000004, 0.0).normalize(), S1ChordAngle.from_length2(2.0)) == 1
+# Long double.
+expect S2Predicates.compare_distance(S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(1.0, -1.0000000000000002, 0.0).normalize(), S1ChordAngle.from_length2(2.0)) == 1
+# Exact.
+expect S2Predicates.compare_distance(S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(1.0, -1.0, 1.0e-30).normalize(), S1ChordAngle.from_length2(2.0)) == 0
+# Exact.
+expect S2Predicates.compare_distance(S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(0.0, 1.0, 1.0).normalize(), S1ChordAngle.from_length2(1.0)) == 0
+# The cases of upstream's CompareEdgeDistance.Coverage test.
+# Double.
+expect S2Predicates.compare_edge_distance(S2Point.new(1.0, 1.0e-10, 1.0e-15), S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S1ChordAngle.from_length2(1.493393016426376e-30)) == -1
+# Long double.
+expect S2Predicates.compare_edge_distance(S2Point.new(1.0, 1.0, 1.0e-15).normalize(), S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S1ChordAngle.from_length2(1.493393016426376e-30)) == -1
+# Exact.
+expect S2Predicates.compare_edge_distance(S2Point.new(1.0, 1.0, 1.0e-40).normalize(), S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S1ChordAngle.from_length2(9.999999999999998e-81)) == -1
+# Exact.
+expect S2Predicates.compare_edge_distance(S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S1ChordAngle.from_length2(0.0)) == 0
+# Double.
+expect S2Predicates.compare_edge_distance(S2Point.new(1.0e-15, 0.0, 1.0), S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S1ChordAngle.from_length2(1.9999999999999964)) == 1
+# Long double.
+expect S2Predicates.compare_edge_distance(S2Point.new(1.0e-15, 0.0, 1.0), S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S1ChordAngle.from_length2(1.9999999999999971)) == 1
+# Exact.
+expect S2Predicates.compare_edge_distance(S2Point.new(1.0e-40, 0.0, 1.0), S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S1ChordAngle.from_length2(2.0)) == -1
+# Exact.
+expect S2Predicates.compare_edge_distance(S2Point.new(0.0, 0.0, 1.0), S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S1ChordAngle.from_length2(2.0)) == 0
+# Double.
+expect S2Predicates.compare_edge_distance(S2Point.new(1.0e-15, -1.0, 0.0), S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 1.0, 0.0).normalize(), S1ChordAngle.from_length2(2.0)) == -1
+# Double.
+expect S2Predicates.compare_edge_distance(S2Point.new(-1.0, -1.0, 1.0).normalize(), S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 1.0, 0.0).normalize(), S1ChordAngle.from_length2(2.0)) == 1
+# Long double.
+expect S2Predicates.compare_edge_distance(S2Point.new(1.0e-18, -1.0, 0.0), S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 1.0, 0.0).normalize(), S1ChordAngle.from_length2(2.0)) == -1
+# Exact.
+expect S2Predicates.compare_edge_distance(S2Point.new(1.0e-100, -1.0, 0.0), S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 1.0, 0.0).normalize(), S1ChordAngle.from_length2(2.0)) == -1
+# Exact.
+expect S2Predicates.compare_edge_distance(S2Point.new(0.0, -1.0, 0.0), S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 1.0, 0.0).normalize(), S1ChordAngle.from_length2(2.0)) == 0
+# Double.
+expect S2Predicates.compare_edge_distance(S2Point.new(-1.0, 0.0, 0.0), S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 1.0, 0.0).normalize(), S1ChordAngle.from_length2(2.0)) == 1
+# Long double.
+expect S2Predicates.compare_edge_distance(S2Point.new(-1.0, 0.0, 0.0), S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0e-18, 1.0, 0.0), S1ChordAngle.from_length2(2.0)) == 1
+# Exact.
+expect S2Predicates.compare_edge_distance(S2Point.new(-1.0, 0.0, 0.0), S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0e-100, 1.0, 0.0), S1ChordAngle.from_length2(2.0)) == 1
+# Exact.
+expect S2Predicates.compare_edge_distance(S2Point.new(0.0, -1.0, 0.0), S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S1ChordAngle.from_length2(2.0)) == 0
+# The cases of upstream's CompareEdgeDirections.Coverage test, and the same
+# with the first edge reversed.
+# Double.
+expect S2Predicates.compare_edge_directions(S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(1.0, -1.0, 0.0).normalize(), S2Point.new(1.0, 0.0, 0.0)) == 1
+expect S2Predicates.compare_edge_directions(S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, -1.0, 0.0).normalize(), S2Point.new(1.0, 0.0, 0.0)) == -1
+# Double.
+expect S2Predicates.compare_edge_directions(S2Point.new(1.0, 0.0, 1.5e-15), S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(0.0, -1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)) == 1
+expect S2Predicates.compare_edge_directions(S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(1.0, 0.0, 1.5e-15), S2Point.new(0.0, -1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)) == -1
+# Long double.
+expect S2Predicates.compare_edge_directions(S2Point.new(1.0, 0.0, 1.0e-18), S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(0.0, -1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)) == 1
+expect S2Predicates.compare_edge_directions(S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(1.0, 0.0, 1.0e-18), S2Point.new(0.0, -1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)) == -1
+# Exact.
+expect S2Predicates.compare_edge_directions(S2Point.new(1.0, 0.0, 1.0e-50), S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(0.0, -1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)) == 1
+expect S2Predicates.compare_edge_directions(S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(1.0, 0.0, 1.0e-50), S2Point.new(0.0, -1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)) == -1
+# Exact.
+expect S2Predicates.compare_edge_directions(S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(0.0, -1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)) == 0
+expect S2Predicates.compare_edge_directions(S2Point.new(1.0, 1.0, 0.0).normalize(), S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, -1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)) == 0
+# The cases of upstream's SignDotProd tests, and two more.
+# Exact.
+expect S2Predicates.sign_dot_prod(S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0)) == 0
+# Long double.
+expect S2Predicates.sign_dot_prod(S2Point.new(1.0, 0.0, 0.0), S2Point.new(2.220446049250313e-16, 1.0, 0.0)) == 1
+# Exact.
+expect S2Predicates.sign_dot_prod(S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0e-45, 1.0, 0.0)) == 1
+# Long double.
+expect S2Predicates.sign_dot_prod(S2Point.new(1.0, 0.0, 0.0), S2Point.new(-2.220446049250313e-16, 1.0, 0.0)) == -1
+# Exact.
+expect S2Predicates.sign_dot_prod(S2Point.new(1.0, 0.0, 0.0), S2Point.new(-1.0e-45, 1.0, 0.0)) == -1
+# Exact.
+expect S2Predicates.sign_dot_prod(S2Point.new(0.6, 0.8, 0.0), S2Point.new(0.8, -0.6, 1.0e-300)) == 0
+# Exact.
+expect S2Predicates.sign_dot_prod(S2Point.new(1.0, 1.0, 0.0), S2Point.new(1.0, -1.0, 0.0)) == 0
+
 ## `1`, `-1`, or `0` according to the sign of a double.
 sign_of : F64 -> I8
 sign_of = |x|
@@ -359,4 +650,328 @@ stable_sign = |a, b, c| {
 	} else {
 		-1
 	}
+}
+
+## Half of `F64` machine epsilon: the largest relative error of one rounded
+## operation.
+dbl_err : F64
+dbl_err = 1.1102230246251565e-16
+
+## `F64` machine epsilon.
+f64_epsilon : F64
+f64_epsilon = 2.220446049250313e-16
+
+## The square root of 3.
+sqrt3 : F64
+sqrt3 = 1.7320508075688772
+
+## The square root of 1/2.
+sqrt1_2 : F64
+sqrt1_2 = 0.7071067811865476
+
+## The squared chord length of 45 degrees, `2 - sqrt(2)`.
+k45_degrees_length2 : F64
+k45_degrees_length2 = 2.0 - 1.4142135623730951
+
+## The three coordinates of a point, the form `S2Exact` takes.
+coords : S2Point -> (F64, F64, F64)
+coords = |p| (p.x(), p.y(), p.z())
+
+## `cos(xy)` and the largest error in it.
+cos_distance : S2Point, S2Point -> (F64, F64)
+cos_distance = |x, y| {
+	c = x.dot(y)
+	(c, 9.5 * dbl_err * c.abs() + 1.5 * dbl_err)
+}
+
+## `sin^2(xy)` and the largest error in it.
+##
+## The `(x - y) x (x + y)` form cancels almost all of the error that comes
+## from `x` and `y` not being exactly unit length, so the relative error stays
+## small even for tiny distances.
+sin2_distance : S2Point, S2Point -> (F64, F64)
+sin2_distance = |x, y| {
+	n = (x - y).cross(x + y)
+	d2 = 0.25 * n.norm2()
+	error =
+		(21.0 + 4.0 * sqrt3) * dbl_err * d2
+			+ 32.0 * sqrt3 * dbl_err * dbl_err * d2.sqrt()
+			+ 768.0 * dbl_err * dbl_err * dbl_err * dbl_err
+	(d2, error)
+}
+
+## `compare_distances` from cosines, or `0` when the error bound says the
+## answer is uncertain.
+triage_compare_cos_distances : S2Point, S2Point, S2Point -> I8
+triage_compare_cos_distances = |x, a, b| {
+	(cos_ax, cos_ax_error) = cos_distance(a, x)
+	(cos_bx, cos_bx_error) = cos_distance(b, x)
+	diff = cos_ax - cos_bx
+	error = cos_ax_error + cos_bx_error
+	if diff > error {
+		-1
+	} else if diff < -error {
+		1
+	} else {
+		0
+	}
+}
+
+## `compare_distances` from squared sines, valid when both angles are below
+## 90 degrees, or `0` when the answer is uncertain.
+triage_compare_sin2_distances : S2Point, S2Point, S2Point -> I8
+triage_compare_sin2_distances = |x, a, b| {
+	(sin2_ax, sin2_ax_error) = sin2_distance(a, x)
+	(sin2_bx, sin2_bx_error) = sin2_distance(b, x)
+	diff = sin2_ax - sin2_bx
+	error = sin2_ax_error + sin2_bx_error
+	if diff > error {
+		1
+	} else if diff < -error {
+		-1
+	} else {
+		0
+	}
+}
+
+## `compare_distances` in exact arithmetic, as though the points lay exactly
+## on the sphere: it tests `x.a / |a| < x.b / |b|` with both sides squared.
+## Zero when the distances are exactly equal.
+exact_compare_distances : S2Point, S2Point, S2Point -> I8
+exact_compare_distances = |x, a, b| {
+	cos_ax = S2Exact.dot(coords(x), coords(a))
+	cos_bx = S2Exact.dot(coords(x), coords(b))
+	a_sign = S2Exact.sign_of(cos_ax)
+	b_sign = S2Exact.sign_of(cos_bx)
+	if a_sign != b_sign {
+		# A larger cosine is a smaller distance.
+		return if (a_sign > b_sign) -1 else 1
+	}
+	a_norm2 = S2Exact.norm2_exact(S2Exact.vector(coords(a)))
+	b_norm2 = S2Exact.norm2_exact(S2Exact.vector(coords(b)))
+	cmp = S2Exact.sub(
+		S2Exact.mul(S2Exact.square(cos_bx), a_norm2),
+		S2Exact.mul(S2Exact.square(cos_ax), b_norm2),
+	)
+	a_sign * S2Exact.sign_of(cmp)
+}
+
+## `compare_distance` from cosines, or `0` when the answer is uncertain.
+triage_compare_cos_distance : S2Point, S2Point, F64 -> I8
+triage_compare_cos_distance = |x, y, r2| {
+	(cos_xy, cos_xy_error) = cos_distance(x, y)
+	cos_r = 1.0 - 0.5 * r2
+	cos_r_error = 2.0 * dbl_err * cos_r
+	diff = cos_xy - cos_r
+	error = cos_xy_error + cos_r_error
+	if diff > error {
+		-1
+	} else if diff < -error {
+		1
+	} else {
+		0
+	}
+}
+
+## `compare_distance` from squared sines, valid for limits below 90 degrees,
+## or `0` when the answer is uncertain.
+triage_compare_sin2_distance : S2Point, S2Point, F64 -> I8
+triage_compare_sin2_distance = |x, y, r2| {
+	(sin2_xy, sin2_xy_error) = sin2_distance(x, y)
+	sin2_r = r2 * (1.0 - 0.25 * r2)
+	sin2_r_error = 3.0 * dbl_err * sin2_r
+	diff = sin2_xy - sin2_r
+	error = sin2_xy_error + sin2_r_error
+	if diff > error {
+		1
+	} else if diff < -error {
+		-1
+	} else {
+		0
+	}
+}
+
+## `compare_distance` in exact arithmetic, comparing `cos(xy)` with
+## `cos(r) = 1 - r2 / 2` with both sides squared.
+exact_compare_distance : S2Point, S2Point, F64 -> I8
+exact_compare_distance = |x, y, r2| {
+	cos_xy = S2Exact.dot(coords(x), coords(y))
+	cos_r = S2Exact.grow(S2Exact.from_f64(-0.5 * r2), 1.0)
+	xy_sign = S2Exact.sign_of(cos_xy)
+	r_sign = S2Exact.sign_of(cos_r)
+	if xy_sign != r_sign {
+		return if (xy_sign > r_sign) -1 else 1
+	}
+	x_norm2 = S2Exact.norm2_exact(S2Exact.vector(coords(x)))
+	y_norm2 = S2Exact.norm2_exact(S2Exact.vector(coords(y)))
+	cmp = S2Exact.sub(
+		S2Exact.mul(S2Exact.mul(S2Exact.square(cos_r), x_norm2), y_norm2),
+		S2Exact.square(cos_xy),
+	)
+	xy_sign * S2Exact.sign_of(cmp)
+}
+
+## `compare_distance` from cosines, then from squared sines when the limit
+## is small enough for them, or `0` when both are uncertain.
+triage_compare_distance : S2Point, S2Point, F64 -> I8
+triage_compare_distance = |x, y, r2| {
+	sign = triage_compare_cos_distance(x, y, r2)
+	if sign == 0 and r2 < k45_degrees_length2 {
+		triage_compare_sin2_distance(x, y, r2)
+	} else {
+		sign
+	}
+}
+
+## Whichever of `a0` and `a1` is closer to `x`, with ties going to the
+## smaller point, and its squared distance from `x`.
+closest_vertex : S2Point, S2Point, S2Point -> (S2Point, F64)
+closest_vertex = |x, a0, a1| {
+	a0x2 = (a0 - x).norm2()
+	a1x2 = (a1 - x).norm2()
+	if a0x2 < a1x2 or (a0x2 == a1x2 and a0 < a1) {
+		(a0, a0x2)
+	} else {
+		(a1, a1x2)
+	}
+}
+
+## Compares the distance from `x` to the great circle through `a0` and `a1`
+## with `r2`, from squared sines, which is the accurate measure below 45
+## degrees. `n` is `(a0 - a1) x (a0 + a1)`, `n1` its length and `n2` its
+## squared length.
+triage_compare_line_sin2_distance : S2Point, S2Point, S2Point, F64, S2Point, F64, F64 -> I8
+triage_compare_line_sin2_distance = |x, a0, a1, r2, n, n1, n2| {
+	# The closest point is interior to the edge, so the distance is below
+	# 90 degrees.
+	if r2 >= 2.0 {
+		return -1
+	}
+	n2sin2_r = n2 * r2 * (1.0 - 0.25 * r2)
+	(closest, ax2) = closest_vertex(x, a0, a1)
+	x_dn = (x - closest).dot(n)
+	x_dn2 = x_dn * x_dn
+	c1 = ((3.5 + 2.0 * sqrt3) * n1 + 32.0 * sqrt3 * dbl_err) * dbl_err * ax2.sqrt()
+	x_dn2_error = 4.0 * dbl_err * x_dn2 + (2.0 * x_dn.abs() + c1) * c1
+	# x is unit length to within 4 * dbl_err.
+	n2sin2_r_error = 6.0 * dbl_err * n2sin2_r + 8.0 * dbl_err * n2sin2_r
+	diff = x_dn2 - n2sin2_r
+	error = x_dn2_error + n2sin2_r_error
+	if diff > error {
+		1
+	} else if diff < -error {
+		-1
+	} else {
+		0
+	}
+}
+
+## As `triage_compare_line_sin2_distance`, but from squared cosines, which is
+## the accurate measure above 45 degrees.
+triage_compare_line_cos2_distance : S2Point, S2Point, S2Point, F64, S2Point, F64, F64 -> I8
+triage_compare_line_cos2_distance = |x, _a0, _a1, r2, n, n1, n2| {
+	if r2 >= 2.0 {
+		return -1
+	}
+	cos_r = 1.0 - 0.5 * r2
+	n2cos2_r = n2 * cos_r * cos_r
+	# The length of x cross n is the cosine of the distance.
+	m2 = x.cross(n).norm2()
+	m1 = m2.sqrt()
+	m1_error = ((1.0 + 8.0 / sqrt3) * n1 + 32.0 * sqrt3 * dbl_err) * dbl_err
+	m2_error = 3.0 * dbl_err * m2 + (2.0 * m1 + m1_error) * m1_error
+	n2cos2_r_error = 7.0 * dbl_err * n2cos2_r + 8.0 * dbl_err * n2cos2_r
+	diff = m2 - n2cos2_r
+	error = m2_error + n2cos2_r_error
+	if diff > error {
+		-1
+	} else if diff < -error {
+		1
+	} else {
+		0
+	}
+}
+
+## The line distance test that suits the size of the limit.
+triage_compare_line_distance : S2Point, S2Point, S2Point, F64, S2Point, F64, F64 -> I8
+triage_compare_line_distance = |x, a0, a1, r2, n, n1, n2|
+	if r2 < k45_degrees_length2 {
+		triage_compare_line_sin2_distance(x, a0, a1, r2, n, n1, n2)
+	} else {
+		triage_compare_line_cos2_distance(x, a0, a1, r2, n, n1, n2)
+	}
+
+## `compare_edge_distance` in rounded arithmetic, or `0` when the answer is
+## uncertain.
+##
+## The closest point is interior to the edge exactly when `a0.m < 0` and
+## `a1.m > 0`, where `m` is the normal of the plane through `x` that is
+## perpendicular to the edge.
+triage_compare_edge_distance : S2Point, S2Point, S2Point, F64 -> I8
+triage_compare_edge_distance = |x, a0, a1, r2| {
+	n = (a0 - a1).cross(a0 + a1)
+	m = n.cross(x)
+	# Subtracting x first keeps short edges accurate.
+	a0_dir = a0 - x
+	a1_dir = a1 - x
+	a0_sign = a0_dir.dot(m)
+	a1_sign = a1_dir.dot(m)
+	n2 = n.norm2()
+	n1 = n2.sqrt()
+	n1_error = ((3.5 + 8.0 / sqrt3) * n1 + 32.0 * sqrt3 * dbl_err) * dbl_err
+	a0_sign_error = n1_error * a0_dir.norm()
+	a1_sign_error = n1_error * a1_dir.norm()
+	vertex_sign = || triage_compare_distance(x, a0, r2).min(triage_compare_distance(x, a1, r2))
+	if a0_sign < a0_sign_error and a1_sign > -a1_sign_error {
+		line_sign = triage_compare_line_distance(x, a0, a1, r2, n, n1, n2)
+		if a0_sign > -a0_sign_error or a1_sign < a1_sign_error {
+			# Whether the closest point is a vertex or interior is itself
+			# uncertain, so both must agree.
+			if (vertex_sign() == line_sign) line_sign else 0
+		} else {
+			line_sign
+		}
+	} else {
+		vertex_sign()
+	}
+}
+
+## `compare_edge_distance` in exact arithmetic where it matters.
+##
+## Whether the closest point is an endpoint or interior is often easy even
+## when the earlier tests failed, so that choice uses `compare_edge_directions`
+## and the endpoint case uses `compare_distance`. Only the distance to the
+## great circle is always exact.
+exact_compare_edge_distance : S2Point, S2Point, S2Point, S1ChordAngle -> I8
+exact_compare_edge_distance = |x, a0, a1, r| {
+	# compare_edge_directions requires edges without antipodal endpoints.
+	interior =
+		a0 != -x
+			and a1 != -x
+			and S2Predicates.compare_edge_directions(a0, a1, a0, x) > 0
+			and S2Predicates.compare_edge_directions(a0, a1, x, a1) > 0
+	if interior {
+		exact_compare_line_distance(x, a0, a1, r.length2())
+	} else {
+		S2Predicates.compare_distance(x, a0, r).min(S2Predicates.compare_distance(x, a1, r))
+	}
+}
+
+## Compares the distance from `x` to the great circle through `a0` and `a1`
+## with `r2` exactly, comparing `sin^2` of both. Requires that the closest
+## point is interior to the edge.
+exact_compare_line_distance : S2Point, S2Point, S2Point, F64 -> I8
+exact_compare_line_distance = |x, a0, a1, r2| {
+	if r2 >= 2.0 {
+		return -1
+	}
+	n = S2Exact.cross(coords(a0), coords(a1))
+	xv = S2Exact.vector(coords(x))
+	sin_d = S2Exact.dot_exact(xv, n)
+	sin2_r = S2Exact.mul(S2Exact.from_f64(r2), S2Exact.grow(S2Exact.from_f64(-0.25 * r2), 1.0))
+	cmp = S2Exact.sub(
+		S2Exact.square(sin_d),
+		S2Exact.mul(S2Exact.mul(sin2_r, S2Exact.norm2_exact(xv)), S2Exact.norm2_exact(n)),
+	)
+	S2Exact.sign_of(cmp)
 }

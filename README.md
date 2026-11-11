@@ -88,8 +88,11 @@ With no arguments it covers the same 2 km around San Francisco.
 | `S2RegionCoverer` | Approximates any region by a set of cells |
 | `S2Loop` `S2Polyline` | A simple closed polygon and an open chain of edges |
 | `S2Polygon` | Loops nested into a region with holes, and the predicates between two of them |
-| `S2Edge` | Edge crossings, intersections, interpolation and distances |
-| `S2Predicates` | Orientation tests that are exact rather than merely careful |
+| `S2Edge` | Edge crossings, intersections, interpolation, and distances between points and edges and between two edges |
+| `S2EdgeCrosser` | Tests one edge against a chain of others, reusing work between the tests |
+| `S2Predicates` | Orientation and distance comparisons that are exact rather than merely careful |
+| `S2PaddedCell` | A cell with a padded `(u, v)` bound, for descending the cell hierarchy |
+| `S2LatLngRectBounder` | The bounding rectangle of a chain of edges, built one vertex at a time |
 | `S2Earth` | The one place that fixes a radius, converting angles to metres |
 
 Deliberately not ported: `S2ShapeIndex`, and the *constructive* boolean
@@ -104,7 +107,8 @@ containment already on `S2Cap`, `S2LatLngRect` and `S2CellUnion`. Upstream
 routes those through its index for speed; without one they cost the product of
 the two vertex counts, and the answers are the same.
 
-`src/Internal/` holds `S2Boundary`, `S2Exact`, `S2Lookup` and `S2Math`.
+`src/Internal/` holds `S2Boundary`, `S2Crossing`, `S2Exact`, `S2Lookup` and
+`S2Math`.
 `main.roc` does not expose them: they are the port's own machinery, and no
 consumer names them.
 
@@ -165,7 +169,11 @@ floating-point expansions, which represent a sum of products of doubles as a
 list of non-overlapping doubles and lose nothing at any step. That arithmetic
 lives in the package's internal `S2Exact`.
 Points that are exactly collinear are resolved by a symbolic perturbation, so
-the answer is never zero and never inconsistent. The exact arithmetic has one
+the answer is never zero and never inconsistent. The distance comparisons of
+`S2Predicates` and the intersection point of `S2Edge.intersection` escalate
+the same way. Upstream tries `long double` precision between the rounded and
+the exact step; this port goes straight to exact arithmetic, which gives the
+same answers. The exact arithmetic has one
 limit: the error term of a product of two doubles is exact only while it does
 not underflow, so a product with a magnitude below about 1e-290 can lose bits
 or become zero.
@@ -173,11 +181,13 @@ or become zero.
 The costs of that fidelity are documented where they apply. `S2Point.robust_cross`
 uses the long-standing stable formulation rather than upstream's current
 exact-arithmetic one, so the direction it picks for exactly proportional inputs
-is arbitrary rather than canonical. `S2Edge.intersection` is accurate to about
-1e-15 radians for edges meeting at a healthy angle and degrades as that angle
-shrinks. `S2Loop` and `S2Polygon` have no spatial index, so their
-cell tests are linear in the vertex count, and `is_valid` and the predicates
-between two shapes are quadratic.
+is arbitrary rather than canonical. That reaches the functions built on it,
+such as `S2Edge.point_on_line` for antipodal endpoints. The port's own
+`atan2` and the builtin trigonometry can differ from the C library by one unit
+in the last place, so a latitude or a distance occasionally does too. `S2Loop`
+and `S2Polygon` have no spatial index, so their cell tests are linear in the
+vertex count, and `is_valid` and the predicates between two shapes are
+quadratic.
 
 ## Tests
 
@@ -258,7 +268,9 @@ generator gives it the cases and reads back the coverings. Without
 
 The same program also answers single queries, one per input line: the
 trigonometry of `S1Angle`, the face and `(u, v, w)` conversions of `S2Coords`,
-centroids, cell bounds and ranges, and more. The comment at the top of
+centroids, cell bounds and ranges, edge distances and crossings, the exact
+predicates, padded cells, cell and rectangle distances, rectangle bounds, and
+more. The comment at the top of
 `tools/s2_oracle.cc` lists them. The inline tests of those functions quote its
 output, so their expected values come from upstream and not from this port.
 

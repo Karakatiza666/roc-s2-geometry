@@ -4,6 +4,7 @@ import S1ChordAngle
 import S2CellId
 import S2Coords
 import S2Edge
+import S2EdgeCrosser
 import S2LatLng
 import Internal/S2Lookup
 import S2Metric
@@ -230,27 +231,23 @@ S2Cell := { id : S2CellId, face : U64, level : U64, orientation : U64, uv : R2Re
 	may_intersect_cell : S2Cell, S2Cell -> Bool
 	may_intersect_cell = |cell, other| cell.id.intersects(other.id)
 
+	## The number of leaf cells along one edge of the cell.
+	size_ij : S2Cell -> U64
+	size_ij = |cell| S2CellId.size_ij_at_level(cell.level)
+
+	## The edge length of the cell in `(s, t)` coordinates.
+	size_st : S2Cell -> F64
+	size_st = |cell| S2CellId.size_st_at_level(cell.level)
+
 	## The distance from the point to the closest point of the cell, which is
 	## zero when the cell contains it.
 	distance_to_point : S2Cell, S2Point -> S1ChordAngle
-	distance_to_point = |cell, p|
-		if cell.contains_point(p) {
-			S1ChordAngle.zero()
-		} else {
-			cell.boundary_distance_to_point(p)
-		}
+	distance_to_point = |cell, p| distance_internal(cell, p, Bool.True)
 
 	## The distance from the point to the closest point of the cell's
 	## boundary, which is non-zero even for a point inside the cell.
 	boundary_distance_to_point : S2Cell, S2Point -> S1ChordAngle
-	boundary_distance_to_point = |cell, p| {
-		var $best = S1ChordAngle.infinity()
-		for k in (0.U64).until(4) {
-			candidate = S2Edge.distance_to_edge(p, cell.vertex(k), cell.vertex((k + 1) % 4))
-			$best = $best.min(candidate)
-		}
-		$best
-	}
+	boundary_distance_to_point = |cell, p| distance_internal(cell, p, Bool.False)
 
 	## The distance from the point to the furthest point of the cell.
 	##
@@ -260,16 +257,163 @@ S2Cell := { id : S2CellId, face : U64, level : U64, orientation : U64, uv : R2Re
 	## distance from the antipode of the point to the cell.
 	max_distance_to_point : S2Cell, S2Point -> S1ChordAngle
 	max_distance_to_point = |cell, p| {
-		var $worst = S1ChordAngle.negative()
-		for k in (0.U64).until(4) {
-			$worst = $worst.max(S1ChordAngle.from_points(p, cell.vertex(k)))
-		}
-		if $worst <= S1ChordAngle.right() {
-			$worst
+		target = S2Coords.face_xyz_to_uvw(cell.face, p)
+		worst =
+			vertex_chord_distance(cell, target, 0, 0)
+				.max(vertex_chord_distance(cell, target, 1, 0))
+				.max(vertex_chord_distance(cell, target, 0, 1).max(vertex_chord_distance(cell, target, 1, 1)))
+		if worst <= S1ChordAngle.right() {
+			worst
 		} else {
-			S1ChordAngle.straight() - cell.distance_to_point(p.negate())
+			S1ChordAngle.straight() - cell.distance_to_point(-p)
 		}
 	}
+
+	## The distance from the edge `ab` to the closest point of the cell,
+	## which is zero when they meet.
+	distance_to_edge : S2Cell, S2Point, S2Point -> S1ChordAngle
+	distance_to_edge = |cell, a, b| {
+		# An endpoint inside the cell gives zero.
+		endpoints = cell.distance_to_point(a).min(cell.distance_to_point(b))
+		if endpoints == S1ChordAngle.zero() {
+			return endpoints
+		}
+		# So does an edge that crosses the boundary.
+		v = [cell.vertex(0), cell.vertex(1), cell.vertex(2), cell.vertex(3)]
+		(crosses, _) = v.fold(
+			(Bool.False, S2EdgeCrosser.new_with_c(a, b, cell.vertex(3))),
+			|(found, crosser), corner| {
+				(sign, next) = crosser.crossing_sign(corner)
+				(found or sign >= 0, next)
+			},
+		)
+		if crosses {
+			return S1ChordAngle.zero()
+		}
+		# Otherwise the minimum is between a cell vertex and the edge. The
+		# interiors of two edges can only be closest where they cross, which
+		# is ruled out above.
+		v.fold(endpoints, |best, corner| S2Edge.update_min_distance(corner, a, b, best) ?? best)
+	}
+
+	## The distance from the edge `ab` to the furthest point of the cell.
+	max_distance_to_edge : S2Cell, S2Point, S2Point -> S1ChordAngle
+	max_distance_to_edge = |cell, a, b| {
+		endpoints = cell.max_distance_to_point(a).max(cell.max_distance_to_point(b))
+		if endpoints <= S1ChordAngle.right() {
+			endpoints
+		} else {
+			S1ChordAngle.straight() - cell.distance_to_edge(-a, -b)
+		}
+	}
+
+	## The distance between the closest points of two cells, which is zero
+	## when they meet.
+	distance_to_cell : S2Cell, S2Cell -> S1ChordAngle
+	distance_to_cell = |cell, target| {
+		if cell.face == target.face {
+			match furthest_edge(cell, target) {
+				Err(Touching) => S1ChordAngle.zero()
+				Ok(ai) => {
+					# The minimum is between an endpoint of edge ai of this cell
+					# and the opposite edge of the target, or the other way
+					# round.
+					bi = ai.bitwise_xor(2)
+					va1 = cell.vertex(ai)
+					va2 = cell.vertex(ai + 1)
+					vb1 = target.vertex(bi)
+					vb2 = target.vertex(bi + 1)
+					start = S1ChordAngle.infinity()
+					d1 = S2Edge.update_min_distance(va1, vb1, vb2, start) ?? start
+					d2 = S2Edge.update_min_distance(va2, vb1, vb2, d1) ?? d1
+					d3 = S2Edge.update_min_interior_distance(vb1, va1, va2, d2) ?? d2
+					S2Edge.update_min_interior_distance(vb2, va1, va2, d3) ?? d3
+				}
+			}
+		} else {
+			# The minimum is between a vertex of one cell and an edge of the
+			# other: 32 pairs in all.
+			va = vertices(cell)
+			vb = vertices(target)
+			pairs(4).fold(
+				S1ChordAngle.infinity(),
+				|best, (i, j)| {
+					d1 = S2Edge.update_min_distance(at(va, i), at(vb, j), at(vb, j + 1), best) ?? best
+					S2Edge.update_min_interior_distance(at(vb, i), at(va, j), at(va, j + 1), d1) ?? d1
+				},
+			)
+		}
+	}
+
+	## The distance between the furthest points of two cells.
+	max_distance_to_cell : S2Cell, S2Cell -> S1ChordAngle
+	max_distance_to_cell = |cell, target| {
+		# A cell that meets the antipodal image of the other is a straight
+		# angle away from it. That image is the opposite face, with u and v
+		# swapped.
+		opposite_face = if (target.face >= 3) target.face - 3 else target.face + 3
+		if cell.face == opposite_face and cell.uv.intersects(R2Rect.new(target.uv.y(), target.uv.x())) {
+			return S1ChordAngle.straight()
+		}
+		va = vertices(cell)
+		vb = vertices(target)
+		pairs(4).fold(
+			S1ChordAngle.negative(),
+			|best, (i, j)| {
+				d1 = S2Edge.update_max_distance(at(va, i), at(vb, j), at(vb, j + 1), best) ?? best
+				S2Edge.update_max_distance(at(vb, i), at(va, j), at(va, j + 1), d1) ?? d1
+			},
+		)
+	}
+
+	## True when the distance between the cells is less than `limit`.
+	##
+	## Faster than comparing `distance_to_cell`, because it stops at the first
+	## pair of points closer than the limit.
+	is_distance_less : S2Cell, S2Cell, S1ChordAngle -> Bool
+	is_distance_less = |cell, target, limit| {
+		if limit <= S1ChordAngle.zero() {
+			return Bool.False
+		}
+		if cell.face == target.face {
+			match furthest_edge(cell, target) {
+				Err(Touching) => Bool.True
+				Ok(ai) => {
+					bi = ai.bitwise_xor(2)
+					va1 = cell.vertex(ai)
+					va2 = cell.vertex(ai + 1)
+					vb1 = target.vertex(bi)
+					vb2 = target.vertex(bi + 1)
+					S2Edge.update_min_distance(va1, vb1, vb2, limit).is_ok()
+						or S2Edge.update_min_distance(va2, vb1, vb2, limit).is_ok()
+						or S2Edge.update_min_interior_distance(vb1, va1, va2, limit).is_ok()
+						or S2Edge.update_min_interior_distance(vb2, va1, va2, limit).is_ok()
+				}
+			}
+		} else {
+			va = vertices(cell)
+			vb = vertices(target)
+			pairs(4).any(
+				|(i, j)|
+					S2Edge.update_min_distance(at(va, i), at(vb, j), at(vb, j + 1), limit).is_ok()
+						or S2Edge.update_min_interior_distance(at(vb, i), at(va, j), at(va, j + 1), limit).is_ok(),
+			)
+		}
+	}
+
+	## True when the distance between the cells is at most `limit`.
+	is_distance_less_or_equal : S2Cell, S2Cell, S1ChordAngle -> Bool
+	is_distance_less_or_equal = |cell, target, limit| cell.distance_to_cell(target) <= limit
+
+	## True when the distance between the furthest points of the cells is
+	## less than `limit`.
+	is_max_distance_less : S2Cell, S2Cell, S1ChordAngle -> Bool
+	is_max_distance_less = |cell, target, limit| cell.max_distance_to_cell(target) < limit
+
+	## True when the distance between the furthest points of the cells is at
+	## most `limit`.
+	is_max_distance_less_or_equal : S2Cell, S2Cell, S1ChordAngle -> Bool
+	is_max_distance_less_or_equal = |cell, target, limit| cell.max_distance_to_cell(target) <= limit
 
 	is_eq : S2Cell, S2Cell -> Bool
 	is_eq = |a, b| a.id == b.id
@@ -415,3 +559,886 @@ expect {
 	cell.contains_point(S2Point.new(1.0, 1.0000000000000004, 0.0))
 		and !cell.contains_point(S2Point.new(1.0, 1.0000000000000007, 0.0))
 }
+
+## The distance from `target_xyz` to the cell, or to its boundary when
+## `to_interior` is false. Everything is computed in the `(u, v, w)`
+## coordinates of the cell's face.
+distance_internal : S2Cell, S2Point, Bool -> S1ChordAngle
+distance_internal = |cell, target_xyz, to_interior| {
+	target = S2Coords.face_xyz_to_uvw(cell.face, target_xyz)
+	u0 = cell.uv.x().lo()
+	u1 = cell.uv.x().hi()
+	v0 = cell.uv.y().lo()
+	v1 = cell.uv.y().hi()
+	# Dot products with the four edge normals that face up or right: dir01
+	# is the right edge, the upper end of the u axis.
+	dir00 = target.x() - target.z() * u0
+	dir01 = target.x() - target.z() * u1
+	dir10 = target.y() - target.z() * v0
+	dir11 = target.y() - target.z() * v1
+	if dir00 < 0.0 and v_edge_is_closest(cell, target, 0) {
+		return edge_distance(-dir00, u0)
+	}
+	if dir01 > 0.0 and v_edge_is_closest(cell, target, 1) {
+		return edge_distance(dir01, u1)
+	}
+	if dir10 < 0.0 and u_edge_is_closest(cell, target, 0) {
+		return edge_distance(-dir10, v0)
+	}
+	if dir11 > 0.0 and u_edge_is_closest(cell, target, 1) {
+		return edge_distance(dir11, v1)
+	}
+	inside = dir00 >= 0.0 and dir01 <= 0.0 and dir10 >= 0.0 and dir11 <= 0.0
+	if inside {
+		if to_interior {
+			S1ChordAngle.zero()
+		} else {
+			# A cell is a quadrilateral on the sphere rather than a rectangle,
+			# so all four edges are candidates.
+			edge_distance(-dir00, u0)
+				.min(edge_distance(dir01, u1))
+				.min(edge_distance(-dir10, v0).min(edge_distance(dir11, v1)))
+		}
+	} else {
+		# The closest point is a vertex. The edge tests above do not narrow
+		# down which one, since the edges do not meet at right angles.
+		vertex_chord_distance(cell, target, 0, 0)
+			.min(vertex_chord_distance(cell, target, 1, 0))
+			.min(vertex_chord_distance(cell, target, 0, 1).min(vertex_chord_distance(cell, target, 1, 1)))
+	}
+}
+
+## The distance from `p`, in `(u, v, w)` coordinates, to the corner `(i, j)`
+## of the cell.
+vertex_chord_distance : S2Cell, S2Point, U64, U64 -> S1ChordAngle
+vertex_chord_distance = |cell, p, i, j|
+	S1ChordAngle.from_points(p, S2Point.new(cell.uv.x().bound(i), cell.uv.y().bound(j), 1.0).normalize())
+
+## True when `p`, in `(u, v, w)` coordinates, is closer to the interior of
+## the lower (`v_end` 0) or upper (`v_end` 1) edge than to either of its
+## endpoints.
+u_edge_is_closest : S2Cell, S2Point, U64 -> Bool
+u_edge_is_closest = |cell, p, v_end| {
+	u0 = cell.uv.x().lo()
+	u1 = cell.uv.x().hi()
+	v = cell.uv.y().bound(v_end)
+	# The normals of the planes perpendicular to the edge through each of its
+	# endpoints.
+	dir0 = S2Point.new(v * v + 1.0, -u0 * v, -u0)
+	dir1 = S2Point.new(v * v + 1.0, -u1 * v, -u1)
+	p.dot(dir0) > 0.0 and p.dot(dir1) < 0.0
+}
+
+## As `u_edge_is_closest`, for the left (`u_end` 0) or right (`u_end` 1)
+## edge.
+v_edge_is_closest : S2Cell, S2Point, U64 -> Bool
+v_edge_is_closest = |cell, p, u_end| {
+	v0 = cell.uv.y().lo()
+	v1 = cell.uv.y().hi()
+	u = cell.uv.x().bound(u_end)
+	dir0 = S2Point.new(-u * v0, u * u + 1.0, -v0)
+	dir1 = S2Point.new(-u * v1, u * u + 1.0, -v1)
+	p.dot(dir0) > 0.0 and p.dot(dir1) < 0.0
+}
+
+## The distance from a point to a u or v edge at coordinate `uv`, given the
+## dot product `dir` of the point with the edge's normal.
+edge_distance : F64, F64 -> S1ChordAngle
+edge_distance = |dir, uv| {
+	# PR^2 = PQ^2 + QR^2, where Q is P projected onto the plane of the edge
+	# and R the closest point of the edge.
+	pq2 = (dir * dir) / (1.0 + uv * uv)
+	qr = 1.0 - (1.0 - pq2).sqrt()
+	S1ChordAngle.from_length2(pq2 + qr * qr)
+}
+
+## For two cells on the same face, the edge of `a` that is furthest from the
+## opposite edge of `b` in the direction of `b`, or `Err(Touching)` when the
+## cells meet, even at a single point.
+furthest_edge : S2Cell, S2Cell -> Try(U64, [Touching])
+furthest_edge = |a, b| {
+	a_uv = a.uv
+	b_uv = b.uv
+	candidates = [
+		(a_uv.x().lo() - b_uv.x().hi(), 3),
+		(b_uv.x().lo() - a_uv.x().hi(), 1),
+		(a_uv.y().lo() - b_uv.y().hi(), 0),
+		(b_uv.y().lo() - a_uv.y().hi(), 2),
+	]
+	(_, found) = candidates.fold(
+		(0.0, Err(Touching)),
+		|(max_dist, best), (dist, edge)| if (dist > max_dist) (dist, Ok(edge)) else (max_dist, best),
+	)
+	found
+}
+
+## The four vertices of the cell.
+vertices : S2Cell -> List(S2Point)
+vertices = |cell| [cell.vertex(0), cell.vertex(1), cell.vertex(2), cell.vertex(3)]
+
+## The vertex `k` of a list of four, wrapping around.
+at : List(S2Point), U64 -> S2Point
+at = |v, k| v.get(k % 4) ?? S2Point.zero()
+
+## Every pair `(i, j)` with both in `[0, n)`, with `i` varying slowest.
+pairs : U64 -> List((U64, U64))
+pairs = |n| (0.U64).until(n).fold([], |acc, i| (0.U64).until(n).fold(acc, |inner, j| inner.append((i, j))))
+
+# Distances from a point to a cell, its boundary, and its furthest point,
+# from upstream's S2Cell::GetDistance, GetBoundaryDistance and
+# GetMaxDistance.
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(9425259963900493824))
+	p = S2LatLng.from_degrees(10.0, 20.0).to_point()
+	cell.distance_to_point(p).length2() == 3.654442721693221
+		and cell.boundary_distance_to_point(p).length2() == 3.654442721693221
+		and cell.max_distance_to_point(p).length2() == 3.6699361475234324
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	p = S2LatLng.from_degrees(-30.0, 100.0).to_point()
+	cell.distance_to_point(p).length2() == 1.4182021349134346
+		and cell.boundary_distance_to_point(p).length2() == 1.4182021349134346
+		and cell.max_distance_to_point(p).length2() == 1.7661906938443481
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1048576))
+	p = S2Point.new(1.0, 0.0, 0.0).normalize()
+	cell.distance_to_point(p).length2() == 0.8452975039156431
+		and cell.boundary_distance_to_point(p).length2() == 0.8452975039156431
+		and cell.max_distance_to_point(p).length2() == 0.8452994616207485
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(6917529096360558592))
+	p = S2Point.new(-1.0, -1.0, 0.2).normalize()
+	cell.distance_to_point(p).length2() == 1.8377481125934685
+		and cell.boundary_distance_to_point(p).length2() == 1.8377481125934685
+		and cell.max_distance_to_point(p).length2() == 1.8383797757168592
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(12682136550675316736))
+	p = S2Point.new(0.0, 0.0, -1.0)
+	cell.distance_to_point(p).length2() == 0.0
+		and cell.boundary_distance_to_point(p).length2() == 0.585786437626905
+		and cell.max_distance_to_point(p).length2() == 0.8452994616207485
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(12682136550675316736))
+	p = S2LatLng.from_degrees(0.0, 0.0).to_point()
+	cell.distance_to_point(p).length2() == 0.585786437626905
+		and cell.boundary_distance_to_point(p).length2() == 0.585786437626905
+		and cell.max_distance_to_point(p).length2() == 3.414213562373095
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	p = S2LatLng.from_degrees(5.0, 5.0).to_point()
+	cell.distance_to_point(p).length2() == 0.007610603816508934
+		and cell.boundary_distance_to_point(p).length2() == 0.007610603816508934
+		and cell.max_distance_to_point(p).length2() == 0.29022741015810605
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(2341884504082166412))
+	p = S2LatLng.from_degrees(1.0, 95.0).to_point()
+	cell.distance_to_point(p).length2() == 0.8263675422198626
+		and cell.boundary_distance_to_point(p).length2() == 0.8263675422198626
+		and cell.max_distance_to_point(p).length2() == 0.8263675465861035
+}
+# Distances from an edge to a cell, from upstream's S2Cell::GetDistance and
+# GetMaxDistance for edges.
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(9425259963900493824))
+	cell.distance_to_edge(S2LatLng.from_degrees(10.0, 20.0).to_point(), S2LatLng.from_degrees(12.0, 25.0).to_point()).length2() == 3.654442721693221
+		and cell.max_distance_to_edge(S2LatLng.from_degrees(10.0, 20.0).to_point(), S2LatLng.from_degrees(12.0, 25.0).to_point()).length2() == 3.7427377502634784
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	cell.distance_to_edge(S2LatLng.from_degrees(-30.0, 100.0).to_point(), S2LatLng.from_degrees(30.0, 100.0).to_point()).length2() == 0.41074469833158994
+		and cell.max_distance_to_edge(S2LatLng.from_degrees(-30.0, 100.0).to_point(), S2LatLng.from_degrees(30.0, 100.0).to_point()).length2() == 1.7661906938443481
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1048576))
+	cell.distance_to_edge(S2LatLng.from_degrees(0.0, -10.0).to_point(), S2LatLng.from_degrees(0.0, 10.0).to_point()).length2() == 0.6623285551691742
+		and cell.max_distance_to_edge(S2LatLng.from_degrees(0.0, -10.0).to_point(), S2LatLng.from_degrees(0.0, 10.0).to_point()).length2() == 1.0633536016373228
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(12682136550675316736))
+	cell.distance_to_edge(S2LatLng.from_degrees(-10.0, -10.0).to_point(), S2LatLng.from_degrees(-20.0, -20.0).to_point()).length2() == 0.15212730343960795
+		and cell.max_distance_to_edge(S2LatLng.from_degrees(-10.0, -10.0).to_point(), S2LatLng.from_degrees(-20.0, -20.0).to_point()).length2() == 3.1767925524718983
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(6917529096360558592))
+	cell.distance_to_edge(S2LatLng.from_degrees(80.0, 0.0).to_point(), S2LatLng.from_degrees(80.0, 90.0).to_point()).length2() == 0.6621706095410638
+		and cell.max_distance_to_edge(S2LatLng.from_degrees(80.0, 0.0).to_point(), S2LatLng.from_degrees(80.0, 90.0).to_point()).length2() == 1.0638907687100527
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(12682136550675316736))
+	cell.distance_to_edge(S2LatLng.from_degrees(10.0, 170.0).to_point(), S2LatLng.from_degrees(-10.0, -170.0).to_point()).length2() == 0.3470822564667091
+		and cell.max_distance_to_edge(S2LatLng.from_degrees(10.0, 170.0).to_point(), S2LatLng.from_degrees(-10.0, -170.0).to_point()).length2() == 3.652917743533291
+}
+# Distances between cells, from upstream's S2Cell::GetDistance and
+# GetMaxDistance for cells, with the cells of the tests named in the comments.
+# Each limit is the distance itself, so that "less" and "less or equal"
+# differ, and a little more and less.
+# GetDistanceToCellHighDifferenceExample
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(9425259963900493824))
+	target = S2Cell.from_cell_id(S2CellId.from_id(10565374357067005952))
+	cell.distance_to_cell(target).length2() == 1.5371096051531166 and cell.max_distance_to_cell(target).length2() == 1.5829613948022998
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(9425259963900493824))
+	target = S2Cell.from_cell_id(S2CellId.from_id(10565374357067005952))
+	limit = S1ChordAngle.from_length2(1.5371096051531166)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(9425259963900493824))
+	target = S2Cell.from_cell_id(S2CellId.from_id(10565374357067005952))
+	limit = S1ChordAngle.from_length2(1.5371096051531166)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(9425259963900493824))
+	target = S2Cell.from_cell_id(S2CellId.from_id(10565374357067005952))
+	limit = S1ChordAngle.from_length2(1.5371096051531166)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(9425259963900493824))
+	target = S2Cell.from_cell_id(S2CellId.from_id(10565374357067005952))
+	limit = S1ChordAngle.from_length2(1.5829613948022998)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(9425259963900493824))
+	target = S2Cell.from_cell_id(S2CellId.from_id(10565374357067005952))
+	limit = S1ChordAngle.from_length2(1.5829613948022998)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(9425259963900493824))
+	target = S2Cell.from_cell_id(S2CellId.from_id(10565374357067005952))
+	limit = S1ChordAngle.from_length2(0.0)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.False
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+# GetDistanceToCellProjectionExample1
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(2341884504082166412))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	cell.distance_to_cell(target).length2() == 1.1848020234480885 and cell.max_distance_to_cell(target).length2() == 1.6103627624083112
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(2341884504082166412))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	limit = S1ChordAngle.from_length2(1.1848020234480885)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(2341884504082166412))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	limit = S1ChordAngle.from_length2(1.1848020234480885)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(2341884504082166412))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	limit = S1ChordAngle.from_length2(1.1848020234480885)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(2341884504082166412))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	limit = S1ChordAngle.from_length2(1.6103627624083112)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(2341884504082166412))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	limit = S1ChordAngle.from_length2(1.6103627624083112)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(2341884504082166412))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	limit = S1ChordAngle.from_length2(0.0)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.False
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+# GetDistanceToCellProjectionExample2
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(5367593936036560896))
+	target = S2Cell.from_cell_id(S2CellId.from_id(6142909891733356544))
+	cell.distance_to_cell(target).length2() == 1.1405944420980945 and cell.max_distance_to_cell(target).length2() == 1.5622602735510942
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(5367593936036560896))
+	target = S2Cell.from_cell_id(S2CellId.from_id(6142909891733356544))
+	limit = S1ChordAngle.from_length2(1.1405944420980945)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(5367593936036560896))
+	target = S2Cell.from_cell_id(S2CellId.from_id(6142909891733356544))
+	limit = S1ChordAngle.from_length2(1.1405944420980945)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(5367593936036560896))
+	target = S2Cell.from_cell_id(S2CellId.from_id(6142909891733356544))
+	limit = S1ChordAngle.from_length2(1.1405944420980945)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(5367593936036560896))
+	target = S2Cell.from_cell_id(S2CellId.from_id(6142909891733356544))
+	limit = S1ChordAngle.from_length2(1.5622602735510942)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(5367593936036560896))
+	target = S2Cell.from_cell_id(S2CellId.from_id(6142909891733356544))
+	limit = S1ChordAngle.from_length2(1.5622602735510942)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(5367593936036560896))
+	target = S2Cell.from_cell_id(S2CellId.from_id(6142909891733356544))
+	limit = S1ChordAngle.from_length2(0.0)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.False
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+# IsDistanceLess, adjacent
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(1170935903116328960))
+	cell.distance_to_cell(target).length2() == 0.0 and cell.max_distance_to_cell(target).length2() == 0.4387248041078994
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(1170935903116328960))
+	limit = S1ChordAngle.from_length2(0.0)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(1170935903116328960))
+	limit = S1ChordAngle.from_length2(1.0000000000000001e-20)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(1170935903116328960))
+	limit = S1ChordAngle.from_length2(0.0)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(1170935903116328960))
+	limit = S1ChordAngle.from_length2(0.4387248041078994)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(1170935903116328960))
+	limit = S1ChordAngle.from_length2(0.4387248041078994)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(1170935903116328960))
+	limit = S1ChordAngle.from_length2(0.0)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+# IsDistanceLess, adjacent
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(864691128455135232))
+	cell.distance_to_cell(target).length2() == 0.0 and cell.max_distance_to_cell(target).length2() == 1.8341946655420642
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(864691128455135232))
+	limit = S1ChordAngle.from_length2(0.0)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(864691128455135232))
+	limit = S1ChordAngle.from_length2(1.0000000000000001e-20)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(864691128455135232))
+	limit = S1ChordAngle.from_length2(0.0)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(864691128455135232))
+	limit = S1ChordAngle.from_length2(1.8341946655420642)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(864691128455135232))
+	limit = S1ChordAngle.from_length2(1.8341946655420642)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(864691128455135232))
+	limit = S1ChordAngle.from_length2(0.0)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+# IsDistanceLess, not adjacent
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(10304235947423694848))
+	cell.distance_to_cell(target).length2() == 1.2307692307692308 and cell.max_distance_to_cell(target).length2() == 2.9388683612693494
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(10304235947423694848))
+	limit = S1ChordAngle.from_length2(1.2307692307692308)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(10304235947423694848))
+	limit = S1ChordAngle.from_length2(1.2307692307692308)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(10304235947423694848))
+	limit = S1ChordAngle.from_length2(1.2307692307692308)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(10304235947423694848))
+	limit = S1ChordAngle.from_length2(2.9388683612693494)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(10304235947423694848))
+	limit = S1ChordAngle.from_length2(2.9388683612693494)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1945555039024054272))
+	target = S2Cell.from_cell_id(S2CellId.from_id(10304235947423694848))
+	limit = S1ChordAngle.from_length2(0.0)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.False
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1048576))
+	target = S2Cell.from_cell_id(S2CellId.from_id(6917529096360558592))
+	cell.distance_to_cell(target).length2() == 3.9999999054226625 and cell.max_distance_to_cell(target).length2() == 4.0
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1048576))
+	target = S2Cell.from_cell_id(S2CellId.from_id(6917529096360558592))
+	limit = S1ChordAngle.from_length2(3.9999999054226625)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1048576))
+	target = S2Cell.from_cell_id(S2CellId.from_id(6917529096360558592))
+	limit = S1ChordAngle.from_length2(3.9999999054226625)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1048576))
+	target = S2Cell.from_cell_id(S2CellId.from_id(6917529096360558592))
+	limit = S1ChordAngle.from_length2(3.9999999054226625)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1048576))
+	target = S2Cell.from_cell_id(S2CellId.from_id(6917529096360558592))
+	limit = S1ChordAngle.from_length2(4.0)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1048576))
+	target = S2Cell.from_cell_id(S2CellId.from_id(6917529096360558592))
+	limit = S1ChordAngle.from_length2(4.0)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(1048576))
+	target = S2Cell.from_cell_id(S2CellId.from_id(6917529096360558592))
+	limit = S1ChordAngle.from_length2(0.0)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.False
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(12682136550675316736))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	cell.distance_to_cell(target).length2() == 1.0362002528498804 and cell.max_distance_to_cell(target).length2() == 4.0
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(12682136550675316736))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	limit = S1ChordAngle.from_length2(1.0362002528498804)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(12682136550675316736))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	limit = S1ChordAngle.from_length2(1.0362002528498804)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(12682136550675316736))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	limit = S1ChordAngle.from_length2(1.0362002528498804)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(12682136550675316736))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	limit = S1ChordAngle.from_length2(4.0)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(12682136550675316736))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	limit = S1ChordAngle.from_length2(4.0)
+	cell.is_distance_less(target, limit) == Bool.True
+		and cell.is_distance_less_or_equal(target, limit) == Bool.True
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(12682136550675316736))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4593671619917905920))
+	limit = S1ChordAngle.from_length2(0.0)
+	cell.is_distance_less(target, limit) == Bool.False
+		and cell.is_distance_less_or_equal(target, limit) == Bool.False
+		and cell.is_max_distance_less(target, limit) == Bool.False
+		and cell.is_max_distance_less_or_equal(target, limit) == Bool.False
+}
+
+# Pairs of cells on the same face, on every side of each other, where
+# upstream compares only the two facing edges.
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4097994185930440704))
+	cell.distance_to_cell(target).length2() == 0.0 and cell.max_distance_to_cell(target).length2() == 0.002962304919778112
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4092927636349648896))
+	cell.distance_to_cell(target).length2() == 0.000838202066327192 and cell.max_distance_to_cell(target).length2() == 0.007534074161771757
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4179621929176530944))
+	cell.distance_to_cell(target).length2() == 0.1000851927873334 and cell.max_distance_to_cell(target).length2() == 0.142007737870441
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4034943791147253760))
+	cell.distance_to_cell(target).length2() == 0.08444374102409748 and cell.max_distance_to_cell(target).length2() == 0.12135813491564629
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4143593132157566976))
+	cell.distance_to_cell(target).length2() == 0.03968446503850982 and cell.max_distance_to_cell(target).length2() == 0.06836372597838439
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4044513940355416064))
+	cell.distance_to_cell(target).length2() == 0.06024329732521473 and cell.max_distance_to_cell(target).length2() == 0.08939741349468014
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	target = S2Cell.from_cell_id(S2CellId.from_id(2753669697160347648))
+	cell.distance_to_cell(target).length2() == 1.1817926611283667 and cell.max_distance_to_cell(target).length2() == 1.2817975292454895
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	target = S2Cell.from_cell_id(S2CellId.from_id(3395995594014064640))
+	cell.distance_to_cell(target).length2() == 0.8793905329293809 and cell.max_distance_to_cell(target).length2() == 0.9839736986824591
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4097994185930440704))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	cell.distance_to_cell(target).length2() == 0.0 and cell.max_distance_to_cell(target).length2() == 0.002962304919778112
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4092927636349648896))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	cell.distance_to_cell(target).length2() == 0.000838202066327192 and cell.max_distance_to_cell(target).length2() == 0.007534074161771757
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4179621929176530944))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	cell.distance_to_cell(target).length2() == 0.1000851927873334 and cell.max_distance_to_cell(target).length2() == 0.142007737870441
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4034943791147253760))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	cell.distance_to_cell(target).length2() == 0.08444374102409748 and cell.max_distance_to_cell(target).length2() == 0.12135813491564629
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4143593132157566976))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	cell.distance_to_cell(target).length2() == 0.03968446503850982 and cell.max_distance_to_cell(target).length2() == 0.06836372597838439
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4044513940355416064))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	cell.distance_to_cell(target).length2() == 0.06024329732521473 and cell.max_distance_to_cell(target).length2() == 0.08939741349468014
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(2753669697160347648))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	cell.distance_to_cell(target).length2() == 1.1817926611283667 and cell.max_distance_to_cell(target).length2() == 1.2817975292454895
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(3395995594014064640))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	cell.distance_to_cell(target).length2() == 0.8793905329293809 and cell.max_distance_to_cell(target).length2() == 0.9839736986824591
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4092927636349648896))
+	cell.is_distance_less(target, S1ChordAngle.from_length2(0.000838202066327192)) == Bool.False
+		and cell.is_distance_less(target, S1ChordAngle.from_length2(0.0008382021501473987)) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4179621929176530944))
+	cell.is_distance_less(target, S1ChordAngle.from_length2(0.1000851927873334)) == Bool.False
+		and cell.is_distance_less(target, S1ChordAngle.from_length2(0.10008520279585269)) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4034943791147253760))
+	cell.is_distance_less(target, S1ChordAngle.from_length2(0.08444374102409748)) == Bool.False
+		and cell.is_distance_less(target, S1ChordAngle.from_length2(0.08444374946847158)) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4143593132157566976))
+	cell.is_distance_less(target, S1ChordAngle.from_length2(0.03968446503850982)) == Bool.False
+		and cell.is_distance_less(target, S1ChordAngle.from_length2(0.03968446900695633)) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4044513940355416064))
+	cell.is_distance_less(target, S1ChordAngle.from_length2(0.06024329732521473)) == Bool.False
+		and cell.is_distance_less(target, S1ChordAngle.from_length2(0.06024330334954447)) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	target = S2Cell.from_cell_id(S2CellId.from_id(2753669697160347648))
+	cell.is_distance_less(target, S1ChordAngle.from_length2(1.1817926611283667)) == Bool.False
+		and cell.is_distance_less(target, S1ChordAngle.from_length2(1.1817927793076328)) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	target = S2Cell.from_cell_id(S2CellId.from_id(3395995594014064640))
+	cell.is_distance_less(target, S1ChordAngle.from_length2(0.8793905329293809)) == Bool.False
+		and cell.is_distance_less(target, S1ChordAngle.from_length2(0.8793906208684342)) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4092927636349648896))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	cell.is_distance_less(target, S1ChordAngle.from_length2(0.000838202066327192)) == Bool.False
+		and cell.is_distance_less(target, S1ChordAngle.from_length2(0.0008382021501473987)) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4179621929176530944))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	cell.is_distance_less(target, S1ChordAngle.from_length2(0.1000851927873334)) == Bool.False
+		and cell.is_distance_less(target, S1ChordAngle.from_length2(0.10008520279585269)) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4034943791147253760))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	cell.is_distance_less(target, S1ChordAngle.from_length2(0.08444374102409748)) == Bool.False
+		and cell.is_distance_less(target, S1ChordAngle.from_length2(0.08444374946847158)) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4143593132157566976))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	cell.is_distance_less(target, S1ChordAngle.from_length2(0.03968446503850982)) == Bool.False
+		and cell.is_distance_less(target, S1ChordAngle.from_length2(0.03968446900695633)) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(4044513940355416064))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	cell.is_distance_less(target, S1ChordAngle.from_length2(0.06024329732521473)) == Bool.False
+		and cell.is_distance_less(target, S1ChordAngle.from_length2(0.06024330334954447)) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(2753669697160347648))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	cell.is_distance_less(target, S1ChordAngle.from_length2(1.1817926611283667)) == Bool.False
+		and cell.is_distance_less(target, S1ChordAngle.from_length2(1.1817927793076328)) == Bool.True
+}
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(3395995594014064640))
+	target = S2Cell.from_cell_id(S2CellId.from_id(4096305336070176768))
+	cell.is_distance_less(target, S1ChordAngle.from_length2(0.8793905329293809)) == Bool.False
+		and cell.is_distance_less(target, S1ChordAngle.from_length2(0.8793906208684342)) == Bool.True
+}
+
+# Upstream's GetMaxDistanceToCellAntipodal: a leaf cell and the leaf cell of
+# the antipode of a point inside it are a straight angle apart.
+expect {
+	p = S2LatLng.from_degrees(0.0, 0.0).to_point()
+	S2Cell.from_point(p).max_distance_to_cell(S2Cell.from_point(-p)) == S1ChordAngle.straight()
+}
+
+# Upstream's GetMaxDistanceToEdge: an edge whose antipodal image crosses the
+# cell is a straight angle from it, to within 1e-15 radians.
+expect {
+	cell = S2Cell.from_face_pos_level(0, 0, 20)
+	a = -S2Edge.interpolate(cell.center(), cell.vertex(0), 2.0)
+	b = -S2Edge.interpolate(cell.center(), cell.vertex(2), 2.0)
+	(cell.max_distance_to_edge(a, b).radians() - F64.pi).abs() <= 1e-15
+}
+expect S2Cell.from_cell_id(S2CellId.from_face(2).child(1).child(3)).size_ij() == 268435456
+expect S2Cell.from_cell_id(S2CellId.from_face(2).child(1).child(3)).size_st() == 0.25
