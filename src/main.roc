@@ -31,6 +31,7 @@ package
 		S2Earth,
 		S2Edge,
 		S2EdgeCrosser,
+		S2EdgeTessellator,
 		S2LatLng,
 		S2LatLngRect,
 		S2LatLngRectBounder,
@@ -42,6 +43,12 @@ package
 		S2Polygon,
 		S2Polyline,
 		S2Predicates,
+		S2Projection,
+		S2Region,
 		S2RegionCoverer,
+		S2RegionIntersection,
+		S2RegionTermIndexer,
+		S2RegionUnion,
+		S2TextFormat,
 	]
 	{}

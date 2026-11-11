@@ -71,14 +71,18 @@ S2LatLng := { lat : F64, lng : F64 }.{
 	invalid = || { lat: F64.pi, lng: 2.0 * F64.pi }
 
 	## The latitude of a point, computed so that it stays accurate near the
-	## poles.
+	## poles. A coordinate of negative zero counts as a positive zero, so
+	## that points which compare equal give identical positions, as upstream
+	## does with its `+ 0.0`.
 	latitude : S2Point -> S1Angle
 	latitude = |p|
-		S1Angle.from_radians(S2Math.atan2(p.z(), (p.x() * p.x() + p.y() * p.y()).sqrt()))
+		S1Angle.from_radians(S2Math.atan2(p.z() + 0.0, (p.x() * p.x() + p.y() * p.y()).sqrt()))
 
-	## The longitude of a point. The poles report a longitude of zero.
+	## The longitude of a point. The poles report a longitude of zero. A
+	## coordinate of negative zero counts as a positive zero, as for
+	## `latitude`.
 	longitude : S2Point -> S1Angle
-	longitude = |p| S1Angle.from_radians(S2Math.atan2(p.y(), p.x()))
+	longitude = |p| S1Angle.from_radians(S2Math.atan2(p.y() + 0.0, p.x() + 0.0))
 
 	## The latitude as an angle.
 	lat : S2LatLng -> S1Angle
@@ -300,3 +304,9 @@ expect S2LatLng.from_unsigned_e6(4294967295, 2147483648)
 expect S2LatLng.from_unsigned_e7(3000000000, 450000000)
 	== S2LatLng.from_angles(S1Angle.from_radians(-2.2601443020847993), S1Angle.from_radians(0.78539816339744828))
 expect S2LatLng.from_unsigned_e7(0, 0) == S2LatLng.default()
+
+# A coordinate of negative zero gives the same position as a positive zero.
+expect S2LatLng.latitude(S2Point.new(1.0, 0.0, -0.0)).radians().to_bits() == 0
+expect S2LatLng.longitude(S2Point.new(1.0, -0.0, 0.0)).radians().to_bits() == 0
+expect S2LatLng.longitude(S2Point.new(-1.0, -0.0, 0.0)).radians() == F64.pi
+expect S2LatLng.longitude(S2Point.new(-1.0, 0.0, 0.0)).radians() == F64.pi

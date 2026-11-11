@@ -181,6 +181,49 @@
 //                                     or "full". An ITEM is "p X",
 //                                     "line CHAIN", "loop CHAIN" or
 //                                     "poly POLY".
+//
+// Number formatting, text format, projections, tessellation, term indexing and
+// region unions. TEXT is the rest of the line.
+//
+//   fmt_g PRECISION X                 printf("%.*g", PRECISION, X)
+//   libm exp|log X                    the C library's exp or log
+//   atod TEXT                         absl::SimpleAtod of the rest of the
+//                                     line: the double, or "err"
+//   tf_parse KIND TEXT                KIND is point, latlng, latlngs, points,
+//                                     rect, cell, union, loop, line, polygon
+//                                     or verbatim. Prints "ok", the result,
+//                                     "|" and ToString of it, or "err" and
+//                                     the message. A polygon's ToString has
+//                                     its newlines written as \n.
+//   tf_tostr KIND ...                 point X | latlng LAT RAD | rect RECT |
+//                                     cell ID | union N ID_1 ... | loop CHAIN
+//                                     | line CHAIN | poly POLY | points CHAIN
+//                                     | polysep SEP POLY (SEP without spaces)
+//   proj pc|merc SCALE OP ...         project P | unproject X Y |
+//                                     from_ll LAT LNG | to_ll X Y |
+//                                     interpolate F AX AY BX BY | wrap |
+//                                     wrap_dest AX AY BX BY
+//   tess_min                          kMinTolerance in radians
+//   tess_proj pc|merc SCALE TOL N P_1 ... P_N     (TOL is RADIANS, deg:X or e7:N)
+//                                     AppendProjected over the chain
+//   tess_unproj pc|merc SCALE TOL N X_1 Y_1 ... X_N Y_N
+//                                     AppendUnprojected over the chain
+//   term_index MIN MAX MOD CELLS POINTS_ONLY SPACE MARKER PREFIX WHAT
+//                                     MARKER is a character code and PREFIX
+//                                     is "-" for none. WHAT is point P |
+//                                     region SPEC | cells N ID_1 .... Prints
+//                                     the index terms, "|", the query terms.
+//   region_op union|inter N SPEC_1 ... SPEC_N QUERY
+//                                     A SPEC is cap P DEG | rect RECT |
+//                                     cell ID | point P | loop CHAIN |
+//                                     line CHAIN | poly POLY | union N ID_1 ... |
+//                                     ru N SPEC... | ri N SPEC.... QUERY is
+//                                     CELLS N ID_1 ... POINTS M P_1 ...
+//                                     MAX_CELLS MIN MAX MOD. Prints the
+//                                     rectangle bound, cap bound, cell union
+//                                     bound, then per cell Contains and
+//                                     MayIntersect, per point Contains, then
+//                                     the covering and interior covering.
 
 #include <cmath>
 #include <cstdint>
@@ -224,6 +267,13 @@
 #include "s2/s2pointutil.h"
 #include "s2/s2region.h"
 #include "s2/s2region_coverer.h"
+#include "s2/s2edge_tessellator.h"
+#include "s2/s2projections.h"
+#include "s2/s2region_intersection.h"
+#include "s2/s2region_term_indexer.h"
+#include "s2/s2region_union.h"
+#include "s2/s2text_format.h"
+#include "absl/strings/numbers.h"
 
 namespace {
 
@@ -374,6 +424,401 @@ void PrintLoopVertices(const S2Loop& loop) {
 void PrintCellIds(const std::vector<S2CellId>& ids) {
   PrintIds(ids);
   std::printf("\n");
+}
+
+
+std::string Rest(std::istringstream& in) {
+  std::string text;
+  std::getline(in, text);
+  if (!text.empty() && text[0] == ' ') text.erase(0, 1);
+  return text;
+}
+
+std::unique_ptr<S2Region> Spec(std::istringstream& in);
+
+std::vector<std::unique_ptr<S2Region>> Specs(std::istringstream& in) {
+  int n;
+  in >> n;
+  std::vector<std::unique_ptr<S2Region>> regions;
+  for (int i = 0; i < n; ++i) regions.push_back(Spec(in));
+  return regions;
+}
+
+std::unique_ptr<S2Region> Spec(std::istringstream& in) {
+  std::string type;
+  in >> type;
+  if (type == "cap") {
+    S2Point x = Point(in);
+    return std::make_unique<S2Cap>(x, S1Angle::Degrees(Number(in)));
+  } else if (type == "rect") {
+    return std::make_unique<S2LatLngRect>(Rect(in));
+  } else if (type == "cell") {
+    return std::make_unique<S2Cell>(Id(in));
+  } else if (type == "point") {
+    return std::make_unique<S2PointRegion>(Point(in));
+  } else if (type == "loop") {
+    return std::make_unique<S2Loop>(Chain(in), S2Debug::DISABLE);
+  } else if (type == "line") {
+    return std::make_unique<S2Polyline>(Chain(in), S2Debug::DISABLE);
+  } else if (type == "poly") {
+    return Polygon(in);
+  } else if (type == "union") {
+    int count;
+    in >> count;
+    std::vector<S2CellId> cells;
+    for (int i = 0; i < count; ++i) cells.push_back(Id(in));
+    return std::make_unique<S2CellUnion>(std::move(cells));
+  } else if (type == "ru") {
+    return std::make_unique<S2RegionUnion>(Specs(in));
+  } else if (type == "ri") {
+    return std::make_unique<S2RegionIntersection>(Specs(in));
+  }
+  std::fprintf(stderr, "unknown spec: %s\n", type.c_str());
+  std::exit(1);
+}
+
+void PrintStatusPoints(const std::vector<S2Point>& points) {
+  std::printf("%d", static_cast<int>(points.size()));
+  for (const S2Point& p : points) {
+    std::printf(" %.17g %.17g %.17g", p.x(), p.y(), p.z());
+  }
+}
+
+std::string EscapeNewlines(const std::string& text) {
+  std::string out;
+  for (char c : text) {
+    if (c == '\n') out += "\\n"; else out += c;
+  }
+  return out;
+}
+
+void PrintPolygonStructure(const S2Polygon& polygon) {
+  std::printf("%d", polygon.num_loops());
+  for (int k = 0; k < polygon.num_loops(); ++k) {
+    const S2Loop& loop = *polygon.loop(k);
+    std::printf(" %d %d", loop.depth(), loop.num_vertices());
+    for (int i = 0; i < loop.num_vertices(); ++i) {
+      std::printf(" %.17g %.17g %.17g", loop.vertex(i).x(), loop.vertex(i).y(),
+                  loop.vertex(i).z());
+    }
+  }
+}
+
+int TextFormat(const std::string& kind, std::istringstream& in) {
+  if (kind == "tf_parse") {
+    std::string type;
+    in >> type;
+    std::string text = Rest(in);
+    if (type == "point") {
+      auto r = s2textformat::MakePoint(text);
+      if (!r.ok()) { std::printf("err %s\n", std::string(r.status().message()).c_str()); return 0; }
+      std::printf("ok %.17g %.17g %.17g | %s\n", r->x(), r->y(), r->z(),
+                  s2textformat::ToString(*r).c_str());
+    } else if (type == "latlng") {
+      auto r = s2textformat::MakeLatLng(text);
+      if (!r.ok()) { std::printf("err %s\n", std::string(r.status().message()).c_str()); return 0; }
+      std::printf("ok %.17g %.17g | %s\n", r->lat().radians(), r->lng().radians(),
+                  s2textformat::ToString(*r).c_str());
+    } else if (type == "latlngs") {
+      auto r = s2textformat::ParseLatLngs(text);
+      if (!r.ok()) { std::printf("err %s\n", std::string(r.status().message()).c_str()); return 0; }
+      std::printf("ok %d", static_cast<int>(r->size()));
+      for (const S2LatLng& ll : *r) std::printf(" %.17g %.17g", ll.lat().radians(), ll.lng().radians());
+      std::printf(" | %s\n", s2textformat::ToString(absl::Span<const S2LatLng>(*r)).c_str());
+    } else if (type == "points") {
+      auto r = s2textformat::ParsePoints(text);
+      if (!r.ok()) { std::printf("err %s\n", std::string(r.status().message()).c_str()); return 0; }
+      std::printf("ok ");
+      PrintStatusPoints(*r);
+      std::printf(" | %s\n", s2textformat::ToString(absl::Span<const S2Point>(*r)).c_str());
+    } else if (type == "rect") {
+      auto r = s2textformat::MakeLatLngRect(text);
+      if (!r.ok()) { std::printf("err %s\n", std::string(r.status().message()).c_str()); return 0; }
+      std::printf("ok %.17g %.17g %.17g %.17g | %s\n", r->lat().lo(), r->lat().hi(),
+                  r->lng().lo(), r->lng().hi(), s2textformat::ToString(*r).c_str());
+    } else if (type == "cell") {
+      auto r = s2textformat::MakeCellId(text);
+      if (!r.ok()) { std::printf("err %s\n", std::string(r.status().message()).c_str()); return 0; }
+      std::printf("ok %llu | %s\n", static_cast<unsigned long long>(r->id()),
+                  s2textformat::ToString(*r).c_str());
+    } else if (type == "union") {
+      auto r = s2textformat::MakeCellUnion(text);
+      if (!r.ok()) { std::printf("err %s\n", std::string(r.status().message()).c_str()); return 0; }
+      std::printf("ok ");
+      PrintIds(r->cell_ids());
+      std::printf(" | %s\n", s2textformat::ToString(*r).c_str());
+    } else if (type == "loop") {
+      auto r = s2textformat::MakeLoop(text);
+      if (!r.ok()) { std::printf("err %s\n", std::string(r.status().message()).c_str()); return 0; }
+      std::vector<S2Point> points;
+      for (int i = 0; i < (*r)->num_vertices(); ++i) points.push_back((*r)->vertex(i));
+      std::printf("ok ");
+      PrintStatusPoints(points);
+      std::printf(" | %s\n", s2textformat::ToString(**r).c_str());
+    } else if (type == "line") {
+      auto r = s2textformat::MakePolyline(text);
+      if (!r.ok()) { std::printf("err %s\n", std::string(r.status().message()).c_str()); return 0; }
+      std::vector<S2Point> points;
+      for (int i = 0; i < (*r)->num_vertices(); ++i) points.push_back((*r)->vertex(i));
+      std::printf("ok ");
+      PrintStatusPoints(points);
+      std::printf(" | %s\n", s2textformat::ToString(**r).c_str());
+    } else if (type == "polygon" || type == "verbatim") {
+      auto r = type == "polygon" ? s2textformat::MakePolygon(text)
+                                 : s2textformat::MakeVerbatimPolygon(text);
+      if (!r.ok()) { std::printf("err %s\n", std::string(r.status().message()).c_str()); return 0; }
+      std::printf("ok ");
+      PrintPolygonStructure(**r);
+      std::printf(" | %s\n", EscapeNewlines(s2textformat::ToString(**r)).c_str());
+    } else {
+      return Fail(kind + " " + type);
+    }
+  } else if (kind == "tf_tostr") {
+    std::string type;
+    in >> type;
+    std::string out;
+    if (type == "point") {
+      out = s2textformat::ToString(Point(in));
+    } else if (type == "latlng") {
+      double lat = Number(in), lng = Number(in);
+      out = s2textformat::ToString(S2LatLng::FromRadians(lat, lng));
+    } else if (type == "rect") {
+      out = s2textformat::ToString(Rect(in));
+    } else if (type == "cell") {
+      out = s2textformat::ToString(Id(in));
+    } else if (type == "union") {
+      int count;
+      in >> count;
+      std::vector<S2CellId> ids;
+      for (int i = 0; i < count; ++i) ids.push_back(Id(in));
+      out = s2textformat::ToString(S2CellUnion::FromVerbatim(std::move(ids)));
+    } else if (type == "loop") {
+      out = s2textformat::ToString(S2Loop(Chain(in), S2Debug::DISABLE));
+    } else if (type == "line") {
+      out = s2textformat::ToString(S2Polyline(Chain(in), S2Debug::DISABLE));
+    } else if (type == "poly") {
+      out = EscapeNewlines(s2textformat::ToString(*Polygon(in)));
+    } else if (type == "polysep") {
+      std::string sep;
+      in >> sep;
+      out = s2textformat::ToString(*Polygon(in), sep);
+    } else if (type == "points") {
+      std::vector<S2Point> points = Chain(in);
+      out = s2textformat::ToString(absl::Span<const S2Point>(points));
+    } else {
+      return Fail(kind + " " + type);
+    }
+    std::printf("%s\n", out.c_str());
+  }
+  return 0;
+}
+
+// A tolerance is "deg:X" for S1Angle::Degrees(X), "e7:N" for S1Angle::E7(N),
+// or plain radians.
+S1Angle Tolerance(std::istringstream& in) {
+  std::string text;
+  in >> text;
+  if (text.rfind("deg:", 0) == 0) {
+    return S1Angle::Degrees(std::strtod(text.c_str() + 4, nullptr));
+  }
+  if (text.rfind("e7:", 0) == 0) {
+    return S1Angle::E7(static_cast<int32_t>(std::strtol(text.c_str() + 3, nullptr, 10)));
+  }
+  return S1Angle::Radians(std::strtod(text.c_str(), nullptr));
+}
+
+std::unique_ptr<S2::Projection> MakeProjection(std::istringstream& in) {
+  std::string type;
+  in >> type;
+  double scale = Number(in);
+  if (type == "pc") return std::make_unique<S2::PlateCarreeProjection>(scale);
+  return std::make_unique<S2::MercatorProjection>(scale);
+}
+
+void PrintR2(const R2Point& p) { Print({p.x(), p.y()}); }
+
+int Extras(const std::string& kind, std::istringstream& in) {
+  if (kind == "fmt_g") {
+    int precision;
+    in >> precision;
+    double x = Number(in);
+    std::printf("%.*g\n", precision, x);
+  } else if (kind == "libm") {
+    std::string fn;
+    in >> fn;
+    double x = Number(in);
+    Print({fn == "exp" ? std::exp(x) : std::log(x)});
+  } else if (kind == "atod") {
+    double value;
+    if (absl::SimpleAtod(Rest(in), &value)) {
+      std::printf("%.17g\n", value);
+    } else {
+      std::printf("err\n");
+    }
+  } else if (kind == "tf_parse" || kind == "tf_tostr") {
+    return TextFormat(kind, in);
+  } else if (kind == "proj") {
+    auto proj = MakeProjection(in);
+    std::string op;
+    in >> op;
+    if (op == "project") {
+      PrintR2(proj->Project(Point(in)));
+    } else if (op == "unproject") {
+      double x = Number(in), y = Number(in);
+      PrintPoint(proj->Unproject(R2Point(x, y)));
+    } else if (op == "from_ll") {
+      double lat = Number(in), lng = Number(in);
+      PrintR2(proj->FromLatLng(S2LatLng::FromRadians(lat, lng)));
+    } else if (op == "to_ll") {
+      double x = Number(in), y = Number(in);
+      S2LatLng ll = proj->ToLatLng(R2Point(x, y));
+      Print({ll.lat().radians(), ll.lng().radians()});
+    } else if (op == "interpolate") {
+      double f = Number(in), ax = Number(in), ay = Number(in);
+      double bx = Number(in), by = Number(in);
+      PrintR2(proj->Interpolate(f, R2Point(ax, ay), R2Point(bx, by)));
+    } else if (op == "wrap") {
+      PrintR2(proj->wrap_distance());
+    } else if (op == "wrap_dest") {
+      double ax = Number(in), ay = Number(in);
+      double bx = Number(in), by = Number(in);
+      PrintR2(proj->WrapDestination(R2Point(ax, ay), R2Point(bx, by)));
+    } else {
+      return Fail(kind + " " + op);
+    }
+  } else if (kind == "tess_min") {
+    Print({S2EdgeTessellator::kMinTolerance().radians()});
+  } else if (kind == "tess_proj") {
+    auto proj = MakeProjection(in);
+    S1Angle tolerance = Tolerance(in);
+    S2EdgeTessellator tess(proj.get(), tolerance);
+    std::vector<S2Point> chain = Chain(in);
+    std::vector<R2Point> vertices;
+    for (size_t i = 0; i + 1 < chain.size(); ++i) {
+      tess.AppendProjected(chain[i], chain[i + 1], &vertices);
+    }
+    std::printf("%d", static_cast<int>(vertices.size()));
+    for (const R2Point& v : vertices) std::printf(" %.17g %.17g", v.x(), v.y());
+    std::printf("\n");
+  } else if (kind == "tess_unproj") {
+    auto proj = MakeProjection(in);
+    S1Angle tolerance = Tolerance(in);
+    S2EdgeTessellator tess(proj.get(), tolerance);
+    int n;
+    in >> n;
+    std::vector<R2Point> chain;
+    for (int i = 0; i < n; ++i) {
+      double x = Number(in), y = Number(in);
+      chain.push_back(R2Point(x, y));
+    }
+    std::vector<S2Point> vertices;
+    for (size_t i = 0; i + 1 < chain.size(); ++i) {
+      tess.AppendUnprojected(chain[i], chain[i + 1], &vertices);
+    }
+    PrintStatusPoints(vertices);
+    std::printf("\n");
+  } else if (kind == "term_index") {
+    S2RegionTermIndexer::Options options;
+    int min_level, max_level, level_mod, max_cells, points_only, space, marker;
+    in >> min_level >> max_level >> level_mod >> max_cells >> points_only >>
+        space >> marker;
+    std::string prefix;
+    in >> prefix;
+    if (prefix == "-") prefix = "";
+    options.set_min_level(min_level);
+    options.set_max_level(max_level);
+    options.set_level_mod(level_mod);
+    options.set_max_cells(max_cells);
+    options.set_index_contains_points_only(points_only != 0);
+    options.set_optimize_for_space(space != 0);
+    options.set_marker_character(static_cast<char>(marker));
+    S2RegionTermIndexer indexer(options);
+    std::string what;
+    in >> what;
+    std::vector<std::string> index_terms, query_terms;
+    if (what == "point") {
+      S2Point p = Point(in);
+      index_terms = indexer.GetIndexTerms(p, prefix);
+      query_terms = indexer.GetQueryTerms(p, prefix);
+    } else if (what == "region") {
+      auto region = Spec(in);
+      if (points_only == 0) index_terms = indexer.GetIndexTerms(*region, prefix);
+      query_terms = indexer.GetQueryTerms(*region, prefix);
+    } else if (what == "cells") {
+      int count;
+      in >> count;
+      std::vector<S2CellId> ids;
+      for (int i = 0; i < count; ++i) ids.push_back(Id(in));
+      S2CellUnion covering = S2CellUnion::FromVerbatim(std::move(ids));
+      if (points_only == 0) {
+        index_terms = indexer.GetIndexTermsForCanonicalCovering(covering, prefix);
+      }
+      query_terms = indexer.GetQueryTermsForCanonicalCovering(covering, prefix);
+    } else {
+      return Fail(kind + " " + what);
+    }
+    const char* sep = "";
+    for (const std::string& t : index_terms) { std::printf("%s%s", sep, t.c_str()); sep = " "; }
+    std::printf(" |");
+    for (const std::string& t : query_terms) std::printf(" %s", t.c_str());
+    std::printf("\n");
+  } else if (kind == "region_op") {
+    std::string op;
+    in >> op;
+    std::unique_ptr<S2Region> region;
+    auto regions = Specs(in);
+    S2RegionUnion* u = nullptr;
+    if (op == "union") {
+      region = std::make_unique<S2RegionUnion>(std::move(regions));
+    } else {
+      region = std::make_unique<S2RegionIntersection>(std::move(regions));
+    }
+    (void)u;
+    S2LatLngRect rect = region->GetRectBound();
+    S2Cap cap = region->GetCapBound();
+    std::vector<S2CellId> bound;
+    region->GetCellUnionBound(&bound);
+    std::printf("%.17g %.17g %.17g %.17g | %.17g %.17g %.17g %.17g | ",
+                rect.lat().lo(), rect.lat().hi(), rect.lng().lo(), rect.lng().hi(),
+                cap.center().x(), cap.center().y(), cap.center().z(),
+                cap.radius().length2());
+    PrintIds(bound);
+    std::string word;
+    in >> word;  // CELLS
+    int count;
+    in >> count;
+    std::printf(" |");
+    for (int i = 0; i < count; ++i) {
+      S2Cell cell(Id(in));
+      std::printf(" %d%d", region->Contains(cell) ? 1 : 0,
+                  region->MayIntersect(cell) ? 1 : 0);
+    }
+    in >> word;  // POINTS
+    in >> count;
+    std::printf(" |");
+    for (int i = 0; i < count; ++i) {
+      std::printf(" %d", region->Contains(Point(in)) ? 1 : 0);
+    }
+    std::printf(" | ");
+    int max_cells, min_level, max_level, level_mod;
+    in >> max_cells >> min_level >> max_level >> level_mod;
+    S2RegionCoverer::Options options;
+    options.set_max_cells(max_cells);
+    options.set_min_level(min_level);
+    options.set_max_level(max_level);
+    options.set_level_mod(level_mod);
+    S2RegionCoverer coverer(options);
+    std::vector<S2CellId> covering, interior;
+    coverer.GetCovering(*region, &covering);
+    coverer.GetInteriorCovering(*region, &interior);
+    PrintIds(covering);
+    std::printf(" | ");
+    PrintIds(interior);
+    std::printf("\n");
+  } else {
+    return Fail(kind);
+  }
+  return 0;
 }
 
 int Shapes(const std::string& kind, std::istringstream& in) {
@@ -551,7 +996,7 @@ int Shapes(const std::string& kind, std::istringstream& in) {
       PrintLoopVertices(*hull);
     }
   } else {
-    return Fail(kind);
+    return Extras(kind, in);
   }
   return 0;
 }

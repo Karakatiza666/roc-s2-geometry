@@ -86,6 +86,8 @@ With no arguments it covers the same 2 km around San Francisco.
 | `S2Cap` | A disc on the sphere |
 | `S2LatLngRect` | A rectangle in latitude-longitude space |
 | `S2RegionCoverer` | Approximates any region by a set of cells |
+| `S2RegionTermIndexer` | Turns regions into index terms for a text search system |
+| `S2Region` `S2RegionUnion` `S2RegionIntersection` | Any region with its type forgotten, and the union and intersection of a list of them |
 | `S2Loop` `S2Polyline` | A simple closed polygon and an open chain of edges |
 | `S2Polygon` | Loops nested into a region with holes, and the predicates between two of them |
 | `S2PointRegion` | A single point as a region, so that a coverer can cover it |
@@ -95,6 +97,8 @@ With no arguments it covers the same 2 km around San Francisco.
 | `S2Predicates` | Orientation and distance comparisons that are exact rather than merely careful |
 | `S2PaddedCell` | A cell with a padded `(u, v)` bound, for descending the cell hierarchy |
 | `S2LatLngRectBounder` | The bounding rectangle of a chain of edges, built one vertex at a time |
+| `S2Projection` `S2EdgeTessellator` | The plate carree and Mercator projections, and the conversion of an edge between geodesic and projected form |
+| `S2TextFormat` | Reads and writes points, loops, polylines, polygons and cells as short text, such as `0:0, 0:5, 5:0` |
 | `S2Earth` | The one place that fixes a radius, converting angles to metres |
 
 Deliberately not ported: `S2ShapeIndex`, and the *constructive* boolean
@@ -109,8 +113,8 @@ containment already on `S2Cap`, `S2LatLngRect` and `S2CellUnion`. Upstream
 routes those through its index for speed; without one they cost the product of
 the two vertex counts, and the answers are the same.
 
-`src/Internal/` holds `S2Boundary`, `S2Crossing`, `S2Exact`, `S2Lookup` and
-`S2Math`.
+`src/Internal/` holds `S2Boundary`, `S2Crossing`, `S2Exact`, `S2Format`,
+`S2Lookup` and `S2Math`.
 `main.roc` does not expose them: they are the port's own machinery, and no
 consumer names them.
 
@@ -157,7 +161,22 @@ The coverer starts from the region's `cell_union_bound`, as upstream does.
 Every region here bounds itself by the cells that cover its cap bound, except
 `S2Cell`, which is its own bound. Upstream does the same, except for
 `S2Polygon`, which it bounds by the cells of its spatial index. This port has
-no such index, so a covering of a polygon can differ from upstream's.
+no such index, so a covering of a polygon can differ from upstream's. The
+same goes for a loop: upstream's `MayIntersect` is conservative where this
+port's is exact, so the two can cover a loop with different cells.
+
+A list holds one type, so regions of different types go into a union or an
+intersection through `S2Region`. `S2Region.from(region)` wraps any type with
+the three methods above and with `cap_bound`, `rect_bound` and `contains_point`.
+A cap and a cell have no `rect_bound` for the reason given before, so they
+have the wrappers `S2Region.from_cap` and `S2Region.from_cell`.
+`S2RegionUnion.new` and `S2RegionIntersection.new` take a list of the wrapped
+regions and are regions themselves, so a coverer can cover them:
+
+```roc
+union = S2RegionUnion.new([S2Region.from_cap(cap), S2Region.from(rect)])
+S2RegionCoverer.default().covering(union)
+```
 
 ## Exactness
 

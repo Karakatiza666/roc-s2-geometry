@@ -528,6 +528,11 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 	hausdorff_distance = |r, other|
 		r.directed_hausdorff_distance(other).max(other.directed_hausdorff_distance(r))
 
+	## The rectangle itself. Upstream's `GetRectBound`, which a region needs
+	## to have so that it can be wrapped in an `S2Region`.
+	rect_bound : S2LatLngRect -> S2LatLngRect
+	rect_bound = |r| r
+
 	## The bounding cap of the rectangle.
 	##
 	## Picks whichever is smaller: a cap centred on the nearer pole, or one
@@ -1376,3 +1381,8 @@ expect {
 # corner the vertex has three neighbours, not four.
 expect S2LatLngRect.new(R1Interval.new(0.1, 0.3), S1Interval.new(-0.5, 0.2)).cell_union_bound() == [1152921504606846976, 10376293541461622784, 5764607523034234880].map(S2CellId.from_id)
 expect S2LatLngRect.new(R1Interval.new(0.1, 0.3), S1Interval.new(3.0, -3.0)).cell_union_bound() == [7205759403792793600, 7782220156096217088, 8935141660703064064, 8358680908399640576].map(S2CellId.from_id)
+
+expect {
+	rect = S2LatLngRect.from_point_pair(S2LatLng.from_degrees(-10.0, -20.0), S2LatLng.from_degrees(30.0, 40.0))
+	rect.rect_bound() == rect
+}

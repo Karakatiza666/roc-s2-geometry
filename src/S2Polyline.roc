@@ -415,6 +415,11 @@ S2Polyline := { vertices : List(S2Point) }.{
 	cell_union_bound : S2Polyline -> List(S2CellId)
 	cell_union_bound = |line| line.cap_bound().cell_union_bound()
 
+	## Always false: a polyline has no area, so it contains no point.
+	## Upstream's `S2Polyline::Contains(const S2Point&)` does the same.
+	contains_point : S2Polyline, S2Point -> Bool
+	contains_point = |_line, _p| Bool.False
+
 	## Always false: a polyline has no interior, so it contains no cell.
 	contains_cell : S2Polyline, S2Cell -> Bool
 	contains_cell = |_line, _cell| Bool.False
@@ -799,3 +804,9 @@ expect {
 }
 # GetCellUnionBound, from upstream.
 expect S2Polyline.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(10.0, 20.0)]).cell_union_bound() == [1441151880758558720, 864691128455135232, 2017612633061982208, 288230376151711744].map(S2CellId.from_id)
+
+# A polyline has no area, so it contains no point, not even a vertex.
+expect {
+	line = S2Polyline.from_points([S2LatLng.from_degrees(0.0, 0.0).to_point(), S2LatLng.from_degrees(0.0, 10.0).to_point()])
+	!line.contains_point(S2LatLng.from_degrees(0.0, 0.0).to_point()) and !line.contains_point(S2LatLng.from_degrees(0.0, 5.0).to_point())
+}

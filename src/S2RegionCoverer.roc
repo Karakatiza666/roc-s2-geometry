@@ -84,6 +84,16 @@ S2RegionCoverer := { min_level : U64, max_level : U64, level_mod : U64, max_cell
 	max_cells : S2RegionCoverer -> U64
 	max_cells = |coverer| coverer.max_cells
 
+	## The finest level a covering may use: `max_level`, lowered if necessary
+	## to a level that `level_mod` allows. Upstream's `true_max_level`.
+	true_max_level : S2RegionCoverer -> U64
+	true_max_level = |coverer|
+		if coverer.level_mod == 1 or coverer.max_level < coverer.min_level {
+			coverer.max_level
+		} else {
+			coverer.max_level - (coverer.max_level - coverer.min_level) % coverer.level_mod
+		}
+
 	## Cells that together cover the whole region.
 	covering : S2RegionCoverer, r -> List(S2CellId)
 		where [
@@ -334,7 +344,7 @@ canonicalize_covering = |coverer, covering| {
 is_canonical : S2RegionCoverer, List(S2CellId) -> Bool
 is_canonical = |coverer, covering| {
 	min_level = coverer.min_level
-	max_level = true_max_level(coverer)
+	max_level = coverer.true_max_level()
 	level_mod = coverer.level_mod
 	too_many_cells = covering.len() > coverer.max_cells
 	var $same_parent_count = 1.U64
@@ -381,16 +391,6 @@ is_canonical = |coverer, covering| {
 	}
 	Bool.True
 }
-
-## The finest level a covering may use: `max_level`, lowered if necessary to
-## a level that `level_mod` allows.
-true_max_level : S2RegionCoverer -> U64
-true_max_level = |coverer|
-	if coverer.level_mod == 1 or coverer.max_level < coverer.min_level {
-		coverer.max_level
-	} else {
-		coverer.max_level - (coverer.max_level - coverer.min_level) % coverer.level_mod
-	}
 
 ## The finest level at or above `level` that `level_mod` allows.
 adjust_level : S2RegionCoverer, U64 -> U64
@@ -967,3 +967,10 @@ expect {
 	cell = S2Cell.from_cell_id(S2CellId.from_face(2).child_begin_at_level(9))
 	S2RegionCoverer.default().covering(cell) == [cell.id()]
 }
+
+# Upstream's MaxLevelSetLoosely: a maximum level that `level_mod` does not
+# reach is lowered to the one below it.
+expect S2RegionCoverer.default().with_min_level(1).with_level_mod(2).with_max_level(19).true_max_level() == 19
+expect S2RegionCoverer.default().with_min_level(1).with_level_mod(2).with_max_level(20).true_max_level() == 19
+expect S2RegionCoverer.default().with_min_level(0).with_level_mod(3).with_max_level(30).true_max_level() == 30
+expect S2RegionCoverer.default().with_min_level(4).with_max_level(16).true_max_level() == 16
