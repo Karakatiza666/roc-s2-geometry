@@ -835,7 +835,7 @@ expect {
 }
 expect {
 	# The expected cells in this and the next five tests come from upstream's
-	# C++ S2RegionCoverer at v0.14.0, through tools/cover_oracle.cc, with the
+	# C++ S2RegionCoverer at v0.14.0, through tools/s2_oracle.cc, with the
 	# input line given in each comment. Here: capll 10 20 5 12 0 30 1.
 	cap = S2Cap.from_center_angle(
 		S2LatLng.from_degrees(10.0, 20.0).to_point(),

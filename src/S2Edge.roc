@@ -11,6 +11,24 @@ import S2Predicates
 ## rather than on comparisons of rounded determinants.
 S2Edge := [].{
 
+	## The angle turned at `b` when walking from `a` through `b` to `c`, in
+	## radians in `(-pi, pi]`. It is positive for a left turn, which is a
+	## counterclockwise one, and negative for a right turn.
+	##
+	## The magnitude comes from the robust cross products of the edges, so it
+	## stays accurate when two points are very close together. The sign comes
+	## from `S2Predicates.sign`, so it is right for turns close to 180 degrees.
+	## An `a` equal to `c` is allowed and gives a turn of `-pi`.
+	turn_angle : S2Point, S2Point, S2Point -> F64
+	turn_angle = |a, b, c| {
+		angle = a.robust_cross(b).angle_to(b.robust_cross(c)).radians()
+		if S2Predicates.sign(a, b, c) > 0 {
+			angle
+		} else {
+			-angle
+		}
+	}
+
 	## How the edges `ab` and `cd` meet.
 	##
 	## - `1` when they cross at a point interior to both
@@ -358,3 +376,15 @@ simple_crossing = |a, b, c, d| {
 	dac = cd.dot(a)
 	acb * cbd > 0.0 and acb * dac > 0.0
 }
+
+# The values below were printed by upstream's S2::TurnAngle at v0.14.0 through
+# tools/s2_oracle.cc.
+expect S2Edge.turn_angle(S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0))
+	== 1.5707963267948966
+expect S2Edge.turn_angle(S2Point.new(0.0, 0.0, 1.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(1.0, 0.0, 0.0))
+	== -1.5707963267948966
+# Walking back along the same edge turns by pi, and the sign is negative.
+expect S2Edge.turn_angle(S2Point.new(0.0, 1.0, 0.0), S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0))
+	== -3.1415926535897931
+expect S2Edge.turn_angle(S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(1.0, 0.0, 0.0))
+	== -3.1415926535897931

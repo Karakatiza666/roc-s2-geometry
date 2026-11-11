@@ -84,6 +84,38 @@ S2Point := { x : F64, y : F64, z : F64 }.{
 	abs : S2Point -> S2Point
 	abs = |p| { x: p.x.abs(), y: p.y.abs(), z: p.z.abs() }
 
+	## Multiplies the coordinates of the two points one by one, so the result
+	## is `(a.x * b.x, a.y * b.y, a.z * b.z)`.
+	mul_components : S2Point, S2Point -> S2Point
+	mul_components = |a, b| { x: a.x * b.x, y: a.y * b.y, z: a.z * b.z }
+
+	## Divides the coordinates of `a` by those of `b` one by one. A zero
+	## coordinate in `b` gives an infinite or NaN coordinate in the result.
+	div_components : S2Point, S2Point -> S2Point
+	div_components = |a, b| { x: a.x / b.x, y: a.y / b.y, z: a.z / b.z }
+
+	## The smaller coordinate of each pair. When a coordinate is NaN, the
+	## result follows `if b < a b else a`, as upstream's `std::min` does.
+	min : S2Point, S2Point -> S2Point
+	min = |a, b| { x: min_f64(a.x, b.x), y: min_f64(a.y, b.y), z: min_f64(a.z, b.z) }
+
+	## The larger coordinate of each pair. When a coordinate is NaN, the
+	## result follows `if a < b b else a`, as upstream's `std::max` does.
+	max : S2Point, S2Point -> S2Point
+	max = |a, b| { x: max_f64(a.x, b.x), y: max_f64(a.y, b.y), z: max_f64(a.z, b.z) }
+
+	## The square root of each coordinate. A negative coordinate gives NaN.
+	sqrt : S2Point -> S2Point
+	sqrt = |p| { x: S2Math.sqrt(p.x), y: S2Math.sqrt(p.y), z: S2Math.sqrt(p.z) }
+
+	## Each coordinate rounded down to a whole number.
+	floor : S2Point -> S2Point
+	floor = |p| { x: S2Math.floor(p.x), y: S2Math.floor(p.y), z: S2Math.floor(p.z) }
+
+	## Each coordinate rounded up to a whole number.
+	ceil : S2Point -> S2Point
+	ceil = |p| { x: S2Math.ceil(p.x), y: S2Math.ceil(p.y), z: S2Math.ceil(p.z) }
+
 	## The dot product of the two points, taken as vectors.
 	dot : S2Point, S2Point -> F64
 	dot = |a, b| a.x * b.x + a.y * b.y + a.z * b.z
@@ -106,14 +138,14 @@ S2Point := { x : F64, y : F64, z : F64 }.{
 	norm = |p| p.norm2().sqrt()
 
 	## The unit vector in the same direction. The zero vector maps to itself.
+	##
+	## Like upstream, it multiplies by the reciprocal of the length rather than
+	## dividing, so the result can differ in the last digit from a division.
 	normalize : S2Point -> S2Point
 	normalize = |p| {
 		n = p.norm()
-		if n == 0.0 {
-			p
-		} else {
-			{ x: p.x / n, y: p.y / n, z: p.z / n }
-		}
+		k = if (n == 0.0) 0.0 else 1.0 / n
+		{ x: p.x * k, y: p.y * k, z: p.z * k }
 	}
 
 	## The index of the coordinate with the largest magnitude, with ties going
@@ -185,6 +217,14 @@ S2Point := { x : F64, y : F64, z : F64 }.{
 		}
 	}
 
+	## A unit vector that differs from the point, used as the reference
+	## direction when a polygon with semi-open boundaries decides whether it
+	## contains the vertex `a`.
+	##
+	## Upstream defines it as `ortho`, so the result is orthogonal to `a`.
+	ref_dir : S2Point -> S2Point
+	ref_dir = |a| a.ortho()
+
 	## The point rotated `angle` counterclockwise about `axis`.
 	rotate : S2Point, S2Point, S1Angle -> S2Point
 	rotate = |p, axis, angle| {
@@ -244,6 +284,15 @@ S2Point := { x : F64, y : F64, z : F64 }.{
 		.write_u64(p.x.to_bits())
 		.write_u64(p.y.to_bits())
 		.write_u64(p.z.to_bits())
+
+	## The angle at `b` of the path `a`, `b`, `c`, in radians in `[0, pi]`.
+	##
+	## It is the angle between the great circles `ab` and `cb`, taken at `b`.
+	## It uses `robust_cross` for the two circles, so it stays accurate when
+	## two of the points are very close together. The points must be unit
+	## length.
+	angle : S2Point, S2Point, S2Point -> F64
+	angle = |a, b, c| a.robust_cross(b).angle_to(c.robust_cross(b)).radians()
 
 	## The area of the spherical triangle `abc`, in steradians.
 	##
@@ -343,9 +392,44 @@ S2Point := { x : F64, y : F64, z : F64 }.{
 		S2Point.new(ys.cross(zs).dot(r), zs.cross(xs).dot(r), xs.cross(ys).dot(r)) * 0.5
 	}
 
+	## The centroid of the planar triangle `abc`, which is the mean of the
+	## three points.
+	##
+	## Normalize it to get the surface centroid of the spherical triangle,
+	## the point where the three medians meet. For a large triangle that
+	## point may be far from the intuitive centre.
+	planar_centroid : S2Point, S2Point, S2Point -> S2Point
+	planar_centroid = |a, b, c| (a + b + c) * (1.0 / 3.0)
+
+	## The true centroid of the geodesic edge `ab`, scaled by the length of
+	## the edge, so that the centroids of several edges can simply be summed.
+	##
+	## Upstream names this `TrueCentroid` too, with two arguments. The name
+	## here differs because Roc has no overloads. The result is the zero vector
+	## when `a` and `b` are opposite or equal, which is the intended
+	## behaviour. The points must be unit length.
+	edge_true_centroid : S2Point, S2Point -> S2Point
+	edge_true_centroid = |a, b| {
+		vdiff = a - b
+		vsum = a + b
+		sin2 = vdiff.norm2()
+		cos2 = vsum.norm2()
+		if cos2 == 0.0 {
+			S2Point.zero()
+		} else {
+			vsum * (sin2 / cos2).sqrt()
+		}
+	}
+
 	to_inspect : S2Point -> Str
 	to_inspect = |p| "S2Point(${p.x.to_str()}, ${p.y.to_str()}, ${p.z.to_str()})"
 }
+
+min_f64 : F64, F64 -> F64
+min_f64 = |a, b| if (b < a) b else a
+
+max_f64 : F64, F64 -> F64
+max_f64 = |a, b| if (a < b) b else a
 
 ## The angle between two unit-length points by Kahan's formula,
 ## `2 * atan2(|a - b|, |a + b|)`.
@@ -452,3 +536,71 @@ expect {
 	expected = 1.3363055413749088e-13
 	(S2Point.triangle_area(a, b, c) - expected).abs() < 1e-12 * expected
 }
+
+# The values below were printed by upstream's Vector3_d, S2::Angle, S2::RefDir
+# and S2::PlanarCentroid at v0.14.0 through tools/s2_oracle.cc.
+expect S2Point.new(1.0, 2.0, 3.0).mul_components(S2Point.new(4.0, 5.0, 6.0)) == S2Point.new(4.0, 10.0, 18.0)
+expect S2Point.new(1.5, -2.0, 0.0).mul_components(S2Point.new(-4.0, 5.0, 6.0)) == S2Point.new(-6.0, -10.0, 0.0)
+expect S2Point.new(1.0, 2.0, 3.0).div_components(S2Point.new(4.0, 5.0, 8.0))
+	== S2Point.new(0.25, 0.40000000000000002, 0.375)
+expect {
+	# A zero divisor gives an infinity, and zero over zero gives NaN.
+	q = S2Point.new(1.0, -1.0, 0.0).div_components(S2Point.zero())
+	q.x() == F64.infinity and q.y() == -F64.infinity and q.z().is_nan()
+}
+expect S2Point.new(1.0, 2.0, 3.0).div_components(S2Point.new(4.0, -0.0, 6.0)).y() == -F64.infinity
+expect S2Point.new(1.0, 5.0, -3.0).min(S2Point.new(4.0, 2.0, -6.0)) == S2Point.new(1.0, 2.0, -6.0)
+expect S2Point.new(1.0, 5.0, -3.0).max(S2Point.new(4.0, 2.0, -6.0)) == S2Point.new(4.0, 5.0, -3.0)
+expect {
+	# With a NaN, upstream's min keeps the first argument and its max too.
+	lo = S2Point.new(0.0, -0.0, F64.nan).min(S2Point.new(1.0, 1.0, 1.0))
+	hi = S2Point.new(F64.nan, 0.0, 1.0).max(S2Point.new(0.0, F64.nan, 2.0))
+	lo.z().is_nan() and hi.x().is_nan() and hi.y() == 0.0 and hi.z() == 2.0
+		and lo.y().to_bits() == (-0.0).to_bits()
+}
+expect S2Point.new(4.0, 2.0, 0.25).sqrt() == S2Point.new(2.0, 1.4142135623730951, 0.5)
+expect S2Point.new(4.0, 2.0, -1.0).sqrt().z().is_nan()
+expect S2Point.new(1.5, -1.5, 2.0).floor() == S2Point.new(1.0, -2.0, 2.0)
+expect S2Point.new(1.5, -1.5, 2.0).ceil() == S2Point.new(2.0, -1.0, 2.0)
+expect S2Point.new(0.0, 9.0, 0.0).sqrt() == S2Point.new(0.0, 3.0, 0.0)
+
+expect S2Point.new(1.0, 0.0, 0.0).ref_dir() == S2Point.new(0.0, -0.99998595529588608, 0.0052999255630681958)
+expect S2Point.new(0.0, 1.0, 0.0).ref_dir() == S2Point.new(0.004569952278750988, 0.0, -0.99998955771356413)
+expect S2Point.new(0.0, 0.0, 1.0).ref_dir() == S2Point.new(-0.99992800777506696, 0.011999136093300803, 0.0)
+expect S2Point.new(-1.0, 0.0, 0.0).ref_dir() == S2Point.new(0.0, 0.99998595529588608, -0.0052999255630681958)
+expect {
+	a = S2Point.new(0.2672612419124244, 0.5345224838248488, 0.8017837257372732)
+	d = a.ref_dir()
+	d.is_unit_length() and d != a and d.dot(a).abs() < 1e-15
+}
+expect S2Point.new(0.0, 0.0, 0.0).ref_dir() == S2Point.zero()
+
+# S2::Angle is the angle at the middle point, from the cross products of the
+# two edges.
+expect S2Point.angle(S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0))
+	== 1.5707963267948966
+expect S2Point.angle(S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 0.0, 1.0), S2Point.new(0.0, 1.0, 0.0))
+	== 1.5707963267948966
+expect {
+	a = S2Point.new(0.2672612419124244, 0.5345224838248488, 0.8017837257372732)
+	b = S2Point.new(0.26726150917360897, 0.5345219493022504, 0.8017839929983432)
+	c = S2Point.new(0.2672608410207381, 0.5345224838248012, 0.8017838593677558)
+	(S2Point.angle(a, b, c) - 0.49088250009853068).abs() < 1e-14
+}
+
+expect S2Point.planar_centroid(S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0))
+	== S2Point.new(0.33333333333333331, 0.33333333333333331, 0.33333333333333331)
+expect S2Point.planar_centroid(
+	S2Point.new(0.2672612419124244, 0.5345224838248488, 0.8017837257372732),
+	S2Point.new(0.26726150917360897, 0.5345219493022504, 0.8017839929983432),
+	S2Point.new(0.2672608410207381, 0.5345224838248012, 0.8017838593677558),
+)
+	== S2Point.new(0.26726119736892379, 0.53452230565063341, 0.80178385936779062)
+
+# The edge form of upstream's TrueCentroid.
+expect S2Point.edge_true_centroid(S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0))
+	== S2Point.new(1.0, 1.0, 0.0)
+expect S2Point.edge_true_centroid(S2Point.new(1.0, 0.0, 0.0), S2Point.new(-1.0, 0.0, 0.0)) == S2Point.zero()
+expect S2Point.edge_true_centroid(S2Point.new(1.0, 0.0, 0.0), S2Point.new(1.0, 0.0, 0.0)) == S2Point.zero()
+expect S2Point.edge_true_centroid(S2Point.new(0.6, 0.8, 0.0), S2Point.new(0.0, 0.6, 0.8))
+	== S2Point.new(0.35564938701829146, 0.82984856970934673, 0.47419918269105532)

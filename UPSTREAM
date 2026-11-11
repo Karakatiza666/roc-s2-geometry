@@ -23,11 +23,17 @@ s2geometry
 
              tests/CoverCorpus.roc and the expected coverings in
              src/S2RegionCoverer.roc come from running upstream's C++
-             S2RegionCoverer at this tag. tools/cover_oracle.cc is the driver,
+             S2RegionCoverer at this tag. tools/s2_oracle.cc is the driver,
              linked against s2geometry v0.14.0 and abseil-cpp 20250814.1, and
              tools/generate_corpus.py runs it. The corpus was generated with
              libc++, whose priority queue decides the order of candidates
              with equal priority.
+
+             The same driver also answers scalar queries (trigonometry of
+             S1Angle, S2Coords, S2CellId, centroids, and so on). The values in
+             the inline tests of those functions were printed by it, never by
+             the port. See the comment at the top of tools/s2_oracle.cc for
+             the list of queries.
 
 s2sphere
   https://github.com/sidewalklabs/s2sphere

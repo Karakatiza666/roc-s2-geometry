@@ -102,15 +102,7 @@ S2Polyline := { vertices : List(S2Point) }.{
 		while $i < line.vertices.len() {
 			previous = line.vertices.get($i - 1) ?? S2Point.zero()
 			current = line.vertices.get($i) ?? S2Point.zero()
-			# |a - b| is 2 sin(theta) and |a + b| is 2 cos(theta), where theta
-			# is half the edge angle, so this scales a + b to length
-			# 2 sin(theta). An antipodal edge has no midpoint and adds nothing.
-			sum = previous + current
-			cos2 = sum.norm2()
-			if cos2 != 0.0 {
-				sin2 = (previous - current).norm2()
-				$sum = $sum + sum * (sin2 / cos2).sqrt()
-			}
+			$sum = $sum + S2Point.edge_true_centroid(previous, current)
 			$i = $i + 1
 		}
 		$sum

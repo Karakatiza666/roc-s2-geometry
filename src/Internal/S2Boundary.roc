@@ -37,20 +37,6 @@ S2Boundary := [].{
 		points.get(index % points.len()) ?? S2Point.zero()
 	}
 
-	## The angle turned at vertex `b` when walking from `a` to `c`, positive
-	## for a left turn.
-	turn_angle : S2Point, S2Point, S2Point -> F64
-	turn_angle = |a, b, c| {
-		outgoing = b.robust_cross(c)
-		incoming = a.robust_cross(b)
-		angle = outgoing.angle_to(incoming).radians()
-		if S2Predicates.sign(a, b, c) > 0 {
-			angle
-		} else {
-			-angle
-		}
-	}
-
 	## True when any loop edge meets any of the cell's four edges.
 	##
 	## A loop with fewer than two vertices has no edges, so the empty and
@@ -544,11 +530,11 @@ S2Boundary := [].{
 		n = pruned.len()
 		order = S2Boundary.canonical_loop_order(pruned)
 		at = |k| S2Boundary.ordered_vertex(pruned, order, k)
-		var $sum = S2Boundary.turn_angle(at(n - 1), at(0), at(1))
+		var $sum = S2Edge.turn_angle(at(n - 1), at(0), at(1))
 		var $compensation = 0.0
 		var $k = 1
 		while $k < n {
-			angle = S2Boundary.turn_angle(at($k - 1), at($k), at($k + 1)) + $compensation
+			angle = S2Edge.turn_angle(at($k - 1), at($k), at($k + 1)) + $compensation
 			old_sum = $sum
 			$sum = $sum + angle
 			$compensation = (old_sum - $sum) + angle

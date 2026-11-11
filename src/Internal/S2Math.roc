@@ -5,6 +5,12 @@
 ## Internal to this package.
 S2Math := [].{
 
+	## The square root of `x`, or NaN when `x` is negative.
+	##
+	## The builtin `sqrt` crashes on a negative number, where C gives NaN.
+	sqrt : F64 -> F64
+	sqrt = |x| if (x < 0.0) F64.nan else x.sqrt()
+
 	## Largest integral value not greater than `x`, as an `F64`.
 	##
 	## Exact for every finite `x`. A value of magnitude 2^52 or more is

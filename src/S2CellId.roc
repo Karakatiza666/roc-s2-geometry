@@ -1,7 +1,11 @@
+import R1Interval
 import R2Point
+import R2Rect
+import S1Angle
 import S2Coords
 import S2LatLng
 import Internal/S2Lookup
+import Internal/S2Math
 import S2Point
 
 ## A cell in S2's hierarchical decomposition of the sphere, encoded in 64 bits.
@@ -25,6 +29,14 @@ S2CellId := { id : U64 }.{
 	## The number of leaf cells along one edge of a face.
 	max_size : U64
 	max_size = 1073741824
+
+	## The number of cube faces, which is the number of level-0 cells.
+	num_faces : U64
+	num_faces = 6
+
+	## The number of bits a cell id spends on the cube face.
+	face_bits : U64
+	face_bits = 3
 
 	## The number of bits a cell id spends on Hilbert position plus the level
 	## marker.
@@ -54,7 +66,11 @@ S2CellId := { id : U64 }.{
 		id: face_index.shl_wrap(S2CellId.pos_bits).plus_wrap(S2CellId.lsb_for_level(0)),
 	}
 
-	## The cell at the given level whose Hilbert position on `face` is `pos`.
+	## The cell at the given level that contains the Hilbert position `pos` on
+	## `face`.
+	##
+	## The position is that of a leaf cell, so its lowest bit is forced to 1,
+	## and the cell is the ancestor of that leaf at `target_level`.
 	from_face_pos_level : U64, U64, U64 -> S2CellId
 	from_face_pos_level = |face_index, position, target_level|
 		S2CellId.from_id(face_index.shl_wrap(S2CellId.pos_bits).plus_wrap(position.bitwise_or(1)))
@@ -238,6 +254,49 @@ S2CellId := { id : U64 }.{
 		} else {
 			Ok((60 - msb_pos) / 2)
 		}
+	}
+
+	## The number of cells at this cell's level that come before it in Hilbert
+	## order, counting from the first cell of face 0.
+	distance_from_begin : S2CellId -> I64
+	distance_from_begin = |c|
+		c.id.shr_zf_wrap((2 * (S2CellId.max_level - c.level()) + 1).to_u8_wrap()).to_i64_wrap()
+
+	## The largest cell that starts where this one starts and ends before
+	## `limit` starts. It is `limit` itself when there is no such cell.
+	##
+	## Use it to cover a range of leaf cells with few cells. For the half-open
+	## range `[start, limit)`, the cells are `start.maximum_tile(limit)`, then
+	## `next().maximum_tile(limit)` of each one, until the result is `limit`.
+	## The cells start small, grow in the middle of the range, and shrink again
+	## near `limit`.
+	maximum_tile : S2CellId, S2CellId -> S2CellId
+	maximum_tile = |c, limit| {
+		start = c.range_min()
+		if start >= limit.range_min() {
+			return limit
+		}
+		if c.range_max() >= limit {
+			# The cell is too large, so shrink it. Because the range minimum
+			# is below that of the limit, the loop ends by the leaf level.
+			var $shrunk = c
+			while $shrunk.range_max() >= limit {
+				$shrunk = $shrunk.child(0)
+			}
+			return $shrunk
+		}
+		# The cell may be too small, so grow it while it stays inside.
+		var $grown = c
+		var $more = Bool.True
+		while $more and !$grown.is_face() {
+			up = $grown.parent()
+			if up.range_min() != start or up.range_max() >= limit {
+				$more = Bool.False
+			} else {
+				$grown = up
+			}
+		}
+		$grown
 	}
 
 	## The next cell at the same level in Hilbert order, running off the end
@@ -487,6 +546,78 @@ S2CellId := { id : U64 }.{
 			S2Coords.st_to_uv(scale * j_lo.to_f64()),
 			S2Coords.st_to_uv(scale * (j_lo + cell_size).to_f64()),
 		)
+	}
+
+	## The `(s, t)` coordinate of the cell's centre on its own face.
+	center_st : S2CellId -> R2Point
+	center_st = |c| {
+		center = c.center_si_ti()
+		R2Point.new(S2Coords.si_ti_to_st(center.si), S2Coords.si_ti_to_st(center.ti))
+	}
+
+	## The `(s, t)` extent of the cell on its own face, as a rectangle.
+	bound_st : S2CellId -> R2Rect
+	bound_st = |c| {
+		size = c.size_st()
+		R2Rect.from_center_size(c.center_st(), R2Point.new(size, size))
+	}
+
+	## The `(u, v)` extent of the cell with the leaf indices `i` and `j` at
+	## `target_level`, as a rectangle.
+	##
+	## The indices need not be those of the cell's corner: any leaf in the cell
+	## gives the same cell, because the low bits are dropped.
+	ij_level_to_bound_uv : U64, U64, U64 -> R2Rect
+	ij_level_to_bound_uv = |i, j, target_level| {
+		cell_size = S2CellId.size_ij_at_level(target_level)
+		mask = cell_size.bitwise_not().plus_wrap(1)
+		bound = |ij| {
+			lo = ij.bitwise_and(mask)
+			R1Interval.new(
+				S2Coords.st_to_uv(S2Coords.ij_to_st_min(lo)),
+				S2Coords.st_to_uv(S2Coords.ij_to_st_min(lo + cell_size)),
+			)
+		}
+		R2Rect.new(bound(i), bound(j))
+	}
+
+	## The rectangle grown so that it holds every point within `distance` of
+	## it, and the smallest such rectangle.
+	##
+	## A negative distance shrinks the rectangle instead, so that it leaves out
+	## every point within the distance of its boundary. The distance is
+	## measured on the sphere, not in `(u, v)` space, so each side moves a
+	## different amount. This is how to widen a cell's `(u, v)` bound to cover
+	## the points within 5 km of the cell.
+	##
+	## The rectangle lies on one cube face, so it covers at most one
+	## hemisphere. A cell bound can safely grow by at most 45 degrees. For a
+	## negative distance the result is not exact: it may be slightly smaller
+	## than needed. When the rectangle shrinks to nothing, the result is the
+	## single point at its first corner.
+	expanded_by_distance_uv : R2Rect, S1Angle -> R2Rect
+	expanded_by_distance_uv = |uv, distance| {
+		u0 = uv.x().lo()
+		u1 = uv.x().hi()
+		v0 = uv.y().lo()
+		v1 = uv.y().hi()
+		max_u = u0.abs().max(u1.abs())
+		max_v = v0.abs().max(v1.abs())
+		sin_dist = distance.sin()
+		x_interval = R1Interval.new(
+			expand_endpoint(u0, max_v, -sin_dist),
+			expand_endpoint(u1, max_v, sin_dist),
+		)
+		y_interval = R1Interval.new(
+			expand_endpoint(v0, max_u, -sin_dist),
+			expand_endpoint(v1, max_u, sin_dist),
+		)
+		# An R2Rect needs both or neither side to be empty.
+		if x_interval.is_empty() or y_interval.is_empty() {
+			R2Rect.new(R1Interval.new(u0, u0), R1Interval.new(v0, v0))
+		} else {
+			R2Rect.new(x_interval, y_interval)
+		}
 	}
 
 	## The centre of the cell, not normalized.
@@ -800,6 +931,19 @@ hex16 = |value| {
 }
 
 ## The hex digit for a nibble.
+## A new `u` coordinate such that the line `u = u'` is exactly the angle
+## `asin(sin_dist)` away from the edge from `(u, v0)` to `(u, v1)`, where
+## `max_v` is the larger of `|v0|` and `|v1|`.
+##
+## This solves a spherical right triangle, as `S2Cap.rect_bound` does.
+expand_endpoint : F64, F64, F64 -> F64
+expand_endpoint = |u, max_v, sin_dist| {
+	sin_u_shift = sin_dist * S2Math.sqrt((1.0 + u * u + max_v * max_v) / (1.0 + u * u))
+	cos_u_shift = S2Math.sqrt(1.0 - sin_u_shift * sin_u_shift)
+	# This is an expansion of tan(atan(u) + asin(sin_u_shift)).
+	(cos_u_shift * u + sin_u_shift) / (cos_u_shift - sin_u_shift * u)
+}
+
 hex_digits : List(Str)
 hex_digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
 
@@ -815,3 +959,209 @@ hex_value = |byte|
 	} else {
 		Err(BadToken)
 	}
+
+# The values below were printed by upstream's S2CellId at v0.14.0 through
+# tools/s2_oracle.cc.
+expect {
+	# FromFacePosLevel keeps the cell at the level, not the leaf.
+	cases = [
+		{ face: 0, pos: 0, level: 0, id: 1152921504606846976 },
+		{ face: 5, pos: 1152921504606846976, level: 0, id: 12682136550675316736 },
+		{ face: 2, pos: 5, level: 29, id: 4611686018427387908 },
+		{ face: 2, pos: 5, level: 30, id: 4611686018427387909 },
+		{ face: 3, pos: 81985529216486895, level: 7, id: 6999508614608060416 },
+		{ face: 1, pos: 2305843009213693951, level: 12, id: 4611685949707911168 },
+		{ face: 4, pos: 12345, level: 1, id: 9511602413006487552 },
+		{ face: 0, pos: 0, level: 30, id: 1 },
+	]
+	cases.fold(
+		Bool.True,
+		|ok, c| ok and S2CellId.from_face_pos_level(c.face, c.pos, c.level) == S2CellId.from_id(c.id),
+	)
+}
+expect {
+	cases = [
+		{ id: 3269754736974233600, level: 14, begin: 3269754724089331712, end: 3269754758449070080 },
+		{ id: 13473683767604281344, level: 22, begin: 13473679369557835776, end: 13473688165650857984 },
+		{ id: 4168628197916834816, level: 30, begin: 4168628197916833793, end: 4168628197916835841 },
+		{ id: 10440469836151652352, level: 29, begin: 10439343936244809732, end: 10441595736058494980 },
+		{ id: 2338404620882179072, level: 28, begin: 2338404620882178064, end: 2338404620882180112 },
+		{ id: 5599027521151193356, level: 30, begin: 5599027521151193353, end: 5599027521151193361 },
+		{ id: 1733885856537640960, level: 5, begin: 1730508156817113088, end: 1739515356071854080 },
+		{ id: 3905910188457190772, level: 30, begin: 3905910188457190769, end: 3905910188457190777 },
+		{ id: 1152921504606846976, level: 0, begin: 1152921504606846976, end: 3458764513820540928 },
+		{ id: 1152921504606846976, level: 30, begin: 1, end: 2305843009213693953 },
+		{ id: 11529215046068469761, level: 30, begin: 11529215046068469761, end: 11529215046068469763 },
+	]
+	cases.fold(
+		Bool.True,
+		|ok, c| {
+			id = S2CellId.from_id(c.id)
+			ok
+				and id.child_begin_at_level(c.level) == S2CellId.from_id(c.begin)
+				and id.child_end_at_level(c.level) == S2CellId.from_id(c.end)
+		},
+	)
+}
+expect {
+	expected : List(U64)
+	expected = [1152921504606846976, 288230376151711744, 72057594037927936, 18014398509481984, 4503599627370496, 1125899906842624, 281474976710656, 70368744177664, 17592186044416, 4398046511104, 1099511627776, 274877906944, 68719476736, 17179869184, 4294967296, 1073741824, 268435456, 67108864, 16777216, 4194304, 1048576, 262144, 65536, 16384, 4096, 1024, 256, 64, 16, 4, 1]
+	(0.U64).until(31).fold(
+		Bool.True,
+		|ok, level| ok and S2CellId.lsb_for_level(level) == (expected.get(level) ?? 0),
+	)
+}
+expect {
+	# GetCommonAncestorLevel is -1 for cells on different faces.
+	cases = [
+		{ a: 9490411270927548416, b: 9276923292706571493, level: 1 },
+		{ a: 2509826875221098496, b: 2677311090458635151, level: 1 },
+		{ a: 10148806554242629632, b: 9309010023986529877, level: 0 },
+		{ a: 7459093440474971072, b: 8471193027927627091, level: 0 },
+		{ a: 13288095138149937152, b: 11811629783402954752, level: 0 },
+		{ a: 11130345907571130368, b: 9560373548734002099, level: 0 },
+		{ a: 10065513264155983872, b: 9956519077805555712, level: 2 },
+		{ a: 6979407824065396736, b: 8569224190979211264, level: 0 },
+		{ a: 8070450532247928832, b: 7429502321411571712, level: 0 },
+		{ a: 10506543696009232384, b: 10754595910160744448, level: 1 },
+		{ a: 1152921504606846976, b: 3458764513820540928, level: -1 },
+		{ a: 3269754736974233600, b: 3269754736974233600, level: 13 },
+		{ a: 13473683767604281344, b: 13473680469069398016, level: 9 },
+	]
+	cases.fold(
+		Bool.True,
+		|ok, c| {
+			got = S2CellId.from_id(c.a).common_ancestor_level(S2CellId.from_id(c.b))
+			ok and got == (if (c.level < 0) Err(NoCommonAncestor) else Ok(c.level.to_u64_wrap()))
+		},
+	)
+}
+expect {
+	cases = [
+		{ id: 3269754736974233600, face: 1, si: 2011824128, ti: 1056833536, point: (-0.83686380088329315, 1, -0.010580703616142273) },
+		{ id: 13473683767604281344, face: 5, si: 828375040, ti: 1306525696, point: (0.16019821166992188, -0.16975021362304688, -1) },
+		{ id: 4168628197916834816, face: 1, si: 1042801376, ti: 1805987872, point: (0.019487136864886935, 1, 0.60966009127779852) },
+		{ id: 10440469836151652352, face: 4, si: 1442840576, ti: 1308622848, point: (0.16178385416666666, -1, -0.2685546875) },
+		{ id: 2338404620882179072, face: 1, si: 153816224, ti: 48176160, point: (0.81583706599181272, 1, -0.94084763838734897) },
+		{ id: 5599027521151193356, face: 2, si: 828203730, ti: 1787327702, point: (0.16988089101856857, -0.59027401303900495, 1) },
+		{ id: 1733885856537640960, face: 0, si: 2080374784, ti: 1006632960, point: (1, 0.91796875, -0.04296875) },
+		{ id: 3905910188457190772, face: 1, si: 1352555462, ti: 2038999630, point: (-0.19558566952913004, 1, 0.86869111051865744) },
+		{ id: 4611686018427387909, face: 2, si: 3, ti: 3, point: (0.9999999962747097, 0.9999999962747097, 1) },
+		{ id: 1152921504606846976, face: 0, si: 1073741824, ti: 1073741824, point: (1, 0, 0) },
+	]
+	cases.fold(
+		Bool.True,
+		|ok, c| {
+			id = S2CellId.from_id(c.id)
+			got = id.center_si_ti()
+			p = id.to_point_raw()
+			ok
+				and got == { face: c.face, si: c.si, ti: c.ti }
+				and p == S2Point.new(c.point.0, c.point.1, c.point.2)
+		},
+	)
+}
+expect {
+	# MaximumTile: cases with a limit before, inside and far after the cell.
+	cases = [
+		{ id: 8889130030429499392, limit: 8893320591588539943, tile: 8889130030429499392 },
+		{ id: 11077038690122334208, limit: 11077034292075826157, tile: 11077034292075824128 },
+		{ id: 326957320145731584, limit: 326957320279949312, tile: 326957320145731584 },
+		{ id: 10822332307066583504, limit: 10822332307066593245, tile: 10822332307066583504 },
+		{ id: 8621353045025882112, limit: 8621353044958773495, tile: 8621353044958773312 },
+		{ id: 9305562730054287360, limit: 9307814529867972608, tile: 9305562730054287360 },
+		{ id: 3668502698083221504, limit: 4100038831010676736, tile: 3668502698083221504 },
+		{ id: 3782255168020545536, limit: 3833347634134584320, tile: 3782255168020545536 },
+		{ id: 641399986260541440, limit: 2148319860934157760, tile: 641399986461868032 },
+		{ id: 726979767773285376, limit: 726979767773287424, tile: 726979767773285376 },
+		{ id: 9385296358363103232, limit: 9385296289643633059, tile: 9385296289643627520 },
+		{ id: 891239538036874419, limit: 891239538036874421, tile: 891239538036874419 },
+		{ id: 1256538573730031, limit: 1256538573730033, tile: 1256538573730031 },
+		{ id: 3175037737296199680, limit: 3170534137668836063, tile: 3170534137668830208 },
+		{ id: 1152921504606846976, limit: 3458764513820540928, tile: 1152921504606846976 },
+		{ id: 4611686018427387909, limit: 4611686018427387909, tile: 4611686018427387909 },
+		{ id: 4611686018427387908, limit: 4611686018427387909, tile: 4611686018427387905 },
+	]
+	cases.fold(
+		Bool.True,
+		|ok, c| ok and S2CellId.from_id(c.id).maximum_tile(S2CellId.from_id(c.limit)) == S2CellId.from_id(c.tile),
+	)
+}
+
+# Printed by GetCenterST, GetBoundST and distance_from_begin.
+expect {
+	cases = [
+		{ id: 1152921504606846976, s: 0.5, t: 0.5, bound: (0, 1, 0, 1), distance: 0 },
+		{ id: 8070450532247928832, s: 0.5, t: 0.5, bound: (0, 1, 0, 1), distance: 3 },
+		{ id: 12682136550675316736, s: 0.5, t: 0.5, bound: (0, 1, 0, 1), distance: 5 },
+		{ id: 4775657076574030543, s: 0.3243116089142859, t: 0.085606755223125219, bound: (0.32431160844862461, 0.32431160937994719, 0.085606754757463932, 0.085606755688786507), distance: 2387828538287015271 },
+		{ id: 2306031919055241216, s: 0.0147705078125, t: 0.0006103515625, bound: (0.0146484375, 0.014892578125, 0.00048828125, 0.000732421875), distance: 16778590 },
+		{ id: 9224497936761618432, s: 0.015625, t: 0.015625, bound: (0, 0.03125, 0, 0.03125), distance: 4096 },
+		{ id: 1537228672809129301, s: 0.99999999953433871, t: 0.99999999953433871, bound: (0.99999999906867743, 1, 0.99999999906867743, 1), distance: 768614336404564650 },
+		{ id: 11817445422220181504, s: 0.25, t: 0.25, bound: (0, 0.5, 0, 0.5), distance: 20 },
+		{ id: 6917529027641081855, s: 0.99999999953433871, t: 4.6566128730773926e-10, bound: (0.99999999906867743, 1, 0, 9.3132257461547852e-10), distance: 3458764513820540927 },
+	]
+	cases.fold(
+		Bool.True,
+		|ok, c| {
+			id = S2CellId.from_id(c.id)
+			center = id.center_st()
+			bound = id.bound_st()
+			ok
+				and center == R2Point.new(c.s, c.t)
+				and bound.x().lo() == c.bound.0
+				and bound.x().hi() == c.bound.1
+				and bound.y().lo() == c.bound.2
+				and bound.y().hi() == c.bound.3
+				and id.distance_from_begin() == c.distance
+		},
+	)
+}
+# Printed by IJLevelToBoundUV.
+expect {
+	cases = [
+		{ i: 0, j: 0, level: 0, bound: (-1, 1, -1, 1) },
+		{ i: 1073741823, j: 1073741823, level: 0, bound: (-1, 1, -1, 1) },
+		{ i: 5, j: 9, level: 30, bound: (-0.99999998758236563, -0.99999998509883881, -0.99999997764825832, -0.99999997516473149) },
+		{ i: 123456789, j: 987654321, level: 10, bound: (-0.71271896362304688, -0.71041361490885413, 0.79261398315429688, 0.79500834147135413) },
+		{ i: 1073741823, j: 0, level: 1, bound: (0, 1, -1, 0) },
+		{ i: 536870912, j: 536870911, level: 1, bound: (0, 1, -1, 0) },
+		{ i: 100, j: 2000000, level: 20, bound: (-1, -0.99999745686970221, -0.99503788949732552, -0.99503535110367614) },
+	]
+	cases.fold(
+		Bool.True,
+		|ok, c| {
+			bound = S2CellId.ij_level_to_bound_uv(c.i, c.j, c.level)
+			ok
+				and bound.x().lo() == c.bound.0
+				and bound.x().hi() == c.bound.1
+				and bound.y().lo() == c.bound.2
+				and bound.y().hi() == c.bound.3
+		},
+	)
+}
+# Printed by ExpandedByDistanceUV. A shrink past nothing leaves the first corner.
+expect {
+	cases = [
+		{ uv: (-0.5, 0.5, -0.25, 0.25), radians: 0.01, expanded: (-0.51287511515526796, 0.51287511515526796, -0.26184246676223483, 0.26184246676223483) },
+		{ uv: (-0.5, 0.5, -0.25, 0.25), radians: -0.01, expanded: (-0.4872561476974655, 0.4872561476974655, -0.2382231646641319, 0.2382231646641319) },
+		{ uv: (0.0, 1.0, 0.0, 1.0), radians: 0.0, expanded: (0, 1, 0, 1) },
+		{ uv: (0.1, 0.2, 0.3, 0.4), radians: 0.001, expanded: (0.098913056283128145, 0.20111737971358362, 0.29889051870122335, 0.40118031110561769) },
+		{ uv: (0.1, 0.2, 0.3, 0.4), radians: -0.05, expanded: (0.10000000000000001, 0.10000000000000001, 0.29999999999999999, 0.29999999999999999) },
+		{ uv: (-1.0, 1.0, -1.0, 1.0), radians: 0.7, expanded: (-1, -1, -1, -1) },
+		{ uv: (-0.3, 0.7, -1.0, 0.2), radians: 0.1, expanded: (-0.45879242001158149, 0.91335400083022833, -1.2524838712957795, 0.33003876986949349) },
+		{ uv: (0.3243116084486246, 0.3243116093799472, 0.08560675475746393, 0.0856067556887865), radians: 1.567e-06, expanded: (0.32430987090314872, 0.32431334692719593, 0.085605095912551415, 0.085608414534166996) },
+	]
+	cases.fold(
+		Bool.True,
+		|ok, c| {
+			uv = R2Rect.new(R1Interval.new(c.uv.0, c.uv.1), R1Interval.new(c.uv.2, c.uv.3))
+			got = S2CellId.expanded_by_distance_uv(uv, S1Angle.from_radians(c.radians))
+			ok
+				and got.x().lo() == c.expanded.0
+				and got.x().hi() == c.expanded.1
+				and got.y().lo() == c.expanded.2
+				and got.y().hi() == c.expanded.3
+		},
+	)
+}

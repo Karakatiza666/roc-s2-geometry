@@ -14,7 +14,6 @@ import S2Point
 ## about 1e-8 radians rather than 1e-16.
 S1ChordAngle := { length2 : F64 }.{
 
-	## The chord angle whose squared chord length is `length2`.
 	## The chord angle whose squared chord length is `length2`, which is
 	## capped at 4 (180 degrees). A negative value stays as it is.
 	from_length2 : F64 -> S1ChordAngle
@@ -35,6 +34,39 @@ S1ChordAngle := { length2 : F64 }.{
 			{ length2: length * length }
 		}
 	}
+
+	## The chord angle for `radians`, clamped as `from_angle` clamps it.
+	from_radians : F64 -> S1ChordAngle
+	from_radians = |radians| S1ChordAngle.from_angle(S1Angle.from_radians(radians))
+
+	## The chord angle for `degrees`, clamped as `from_angle` clamps it.
+	from_degrees : F64 -> S1ChordAngle
+	from_degrees = |degrees| S1ChordAngle.from_angle(S1Angle.from_degrees(degrees))
+
+	## The chord angle for degrees scaled by 1e5. A negative value gives
+	## `negative`, as in `from_angle`.
+	from_e5 : I64 -> S1ChordAngle
+	from_e5 = |v| S1ChordAngle.from_angle(S1Angle.from_e5(v))
+
+	## The chord angle for degrees scaled by 1e6. A negative value gives
+	## `negative`, as in `from_angle`.
+	from_e6 : I64 -> S1ChordAngle
+	from_e6 = |v| S1ChordAngle.from_angle(S1Angle.from_e6(v))
+
+	## The chord angle for degrees scaled by 1e7. A negative value gives
+	## `negative`, as in `from_angle`.
+	from_e7 : I64 -> S1ChordAngle
+	from_e7 = |v| S1ChordAngle.from_angle(S1Angle.from_e7(v))
+
+	## A chord angle that is never smaller than `angle`, for angles of at most
+	## pi.
+	##
+	## It squares the angle instead of calling `sin`, so it is very fast. The
+	## bound is within 1% for distances up to about 3100 km on the Earth. An
+	## angle of 2 radians or more gives `straight`.
+	fast_upper_bound_from : S1Angle -> S1ChordAngle
+	fast_upper_bound_from = |angle|
+		S1ChordAngle.from_length2(angle.radians() * angle.radians())
 
 	## The angle subtended by two points on the unit sphere.
 	##
@@ -79,6 +111,18 @@ S1ChordAngle := { length2 : F64 }.{
 			S1Angle.from_radians(2.0 * (0.5 * c.length2.sqrt()).asin())
 		}
 	}
+
+	## The angle in degrees scaled by 1e5, rounded half away from zero.
+	e5 : S1ChordAngle -> I64
+	e5 = |c| c.to_angle().e5()
+
+	## The angle in degrees scaled by 1e6, rounded half away from zero.
+	e6 : S1ChordAngle -> I64
+	e6 = |c| c.to_angle().e6()
+
+	## The angle in degrees scaled by 1e7, rounded half away from zero.
+	e7 : S1ChordAngle -> I64
+	e7 = |c| c.to_angle().e7()
 
 	## The angle in radians.
 	radians : S1ChordAngle -> F64
@@ -182,6 +226,11 @@ S1ChordAngle := { length2 : F64 }.{
 	point_constructor_max_error = |c| 4.5 * 2.220446049250313e-16 * c.length2
 		+ 16.0 * 2.220446049250313e-16 * 2.220446049250313e-16
 
+	## The error bound for a chord angle built by `from_angle`, in squared-chord
+	## units.
+	angle_constructor_max_error : S1ChordAngle -> F64
+	angle_constructor_max_error = |c| 1.5 * 2.220446049250313e-16 * c.length2
+
 	## The smallest chord angle greater than this one, which turns a `<`
 	## comparison into a `<=` comparison.
 	successor : S1ChordAngle -> S1ChordAngle
@@ -284,3 +333,36 @@ expect S1ChordAngle.negative() < S1ChordAngle.zero()
 expect S1ChordAngle.straight() < S1ChordAngle.infinity()
 expect S1ChordAngle.right().min(S1ChordAngle.straight()) == S1ChordAngle.right()
 expect S1ChordAngle.right().max(S1ChordAngle.straight()) == S1ChordAngle.straight()
+
+# The values below were printed by upstream's S1ChordAngle at v0.14.0 through
+# tools/s2_oracle.cc.
+expect S1ChordAngle.from_radians(1.0).length2() == 0.91939538826372058
+expect S1ChordAngle.from_radians(0.0) == S1ChordAngle.zero()
+expect S1ChordAngle.from_radians(F64.infinity).is_infinity()
+expect S1ChordAngle.from_degrees(45.0).length2() == 0.58578643762690497
+expect S1ChordAngle.from_degrees(180.0) == S1ChordAngle.straight()
+expect S1ChordAngle.from_degrees(200.0) == S1ChordAngle.straight()
+expect S1ChordAngle.from_degrees(-1.0) == S1ChordAngle.negative()
+expect S1ChordAngle.from_degrees(90.0).length2() == 1.9999999999999996
+expect S1ChordAngle.from_e5(4500000).length2() == 0.58578643762690519
+expect S1ChordAngle.from_e6(-12345678) == S1ChordAngle.negative()
+expect S1ChordAngle.from_e7(123456789).length2() == 0.046249147866173478
+expect S1ChordAngle.from_radians(1.0).e5() == 5729578
+expect S1ChordAngle.from_radians(1.0).e6() == 57295780
+expect S1ChordAngle.from_radians(1.0).e7() == 572957795
+expect S1ChordAngle.from_degrees(180.0).e7() == 1800000000
+expect S1ChordAngle.from_degrees(90.0).e6() == 90000000
+expect S1ChordAngle.from_e7(123456789).e7() == 123456789
+expect S1ChordAngle.zero().e5() == 0
+expect S1ChordAngle.fast_upper_bound_from(S1Angle.from_radians(0.5)).length2() == 0.25
+expect S1ChordAngle.fast_upper_bound_from(S1Angle.from_radians(1.0)).length2() == 1.0
+expect S1ChordAngle.fast_upper_bound_from(S1Angle.from_radians(2.0)) == S1ChordAngle.straight()
+expect S1ChordAngle.fast_upper_bound_from(S1Angle.from_radians(100.0)) == S1ChordAngle.straight()
+expect S1ChordAngle.fast_upper_bound_from(S1Angle.zero()) == S1ChordAngle.zero()
+expect S1ChordAngle.fast_upper_bound_from(S1Angle.from_radians(0.0015696123057604772)).length2()
+	== 2.4636827903947219e-06
+expect S1ChordAngle.from_radians(1.0).angle_constructor_max_error() == 3.0622017863537042e-16
+expect S1ChordAngle.from_degrees(45.0).angle_constructor_max_error() == 1.951060771699614e-16
+expect S1ChordAngle.straight().angle_constructor_max_error() == 1.3322676295501878e-15
+expect S1ChordAngle.zero().angle_constructor_max_error() == 0.0
+expect S1ChordAngle.negative().angle_constructor_max_error() == -3.3306690738754696e-16

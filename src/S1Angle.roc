@@ -29,6 +29,19 @@ S1Angle := { radians : F64 }.{
 	from_e7 : I64 -> S1Angle
 	from_e7 = |v| S1Angle.from_degrees(v.to_f64() * 1e-7)
 
+	## An angle from degrees scaled by 1e6, where `v` is read as a signed 32-bit
+	## number.
+	##
+	## Use this for a coordinate stored as an unsigned 32-bit value: a value of
+	## `2^31` or more means the same angle as `v - 2^32`.
+	from_unsigned_e6 : U32 -> S1Angle
+	from_unsigned_e6 = |v| S1Angle.from_e6(v.to_i32_wrap().to_i64())
+
+	## An angle from degrees scaled by 1e7, where `v` is read as a signed 32-bit
+	## number. See `from_unsigned_e6`.
+	from_unsigned_e7 : U32 -> S1Angle
+	from_unsigned_e7 = |v| S1Angle.from_e7(v.to_i32_wrap().to_i64())
+
 	## The zero angle.
 	zero : () -> S1Angle
 	zero = || { radians: 0.0 }
@@ -67,6 +80,22 @@ S1Angle := { radians : F64 }.{
 			{ radians: r }
 		}
 	}
+
+	## The sine of the angle.
+	sin : S1Angle -> F64
+	sin = |a| a.radians.sin()
+
+	## The cosine of the angle.
+	cos : S1Angle -> F64
+	cos = |a| a.radians.cos()
+
+	## The tangent of the angle.
+	tan : S1Angle -> F64
+	tan = |a| a.radians.tan()
+
+	## The sine and the cosine of the angle together.
+	sin_cos : S1Angle -> { sin : F64, cos : F64 }
+	sin_cos = |a| { sin: a.radians.sin(), cos: a.radians.cos() }
 
 	## The magnitude of the angle.
 	abs : S1Angle -> S1Angle
@@ -149,3 +178,26 @@ expect S1Angle.from_degrees(60.0) >= S1Angle.from_degrees(60.0)
 expect S1Angle.infinity().is_finite() == Bool.False
 expect S1Angle.from_degrees(10.0).min(S1Angle.from_degrees(20.0)).degrees() == 10.0
 expect S1Angle.from_degrees(10.0).max(S1Angle.from_degrees(20.0)).degrees() == 20.0
+
+# The values below were printed by upstream's S1Angle at v0.14.0 through
+# tools/s2_oracle.cc.
+expect S1Angle.from_radians(1.0).sin() == 0.8414709848078965
+expect S1Angle.from_radians(1.0).cos() == 0.54030230586813977
+expect S1Angle.from_radians(1.0).tan() == 1.5574077246549023
+expect S1Angle.from_radians(-2.5).sin() == -0.59847214410395644
+expect S1Angle.from_radians(-2.5).cos() == -0.8011436155469337
+expect S1Angle.from_radians(-2.5).tan() == 0.74702229723866032
+expect S1Angle.zero().sin_cos() == { sin: 0.0, cos: 1.0 }
+expect S1Angle.from_radians(0.5).sin_cos() == { sin: 0.47942553860420301, cos: 0.87758256189037276 }
+# The cosine of a right angle is not zero in floating point, and the tangent
+# is large rather than infinite.
+expect S1Angle.from_radians(1.5707963267948966).sin() == 1.0
+expect S1Angle.from_radians(1.5707963267948966).cos() == 6.123233995736766e-17
+expect S1Angle.from_radians(1.5707963267948966).tan() == 16331239353195370.0
+# Upstream reads the argument as a signed 32-bit number.
+expect S1Angle.from_unsigned_e6(4294967295).radians() == -1.7453292519943295e-08
+expect S1Angle.from_unsigned_e6(2147483648).radians() == -37.480660290338939
+expect S1Angle.from_unsigned_e6(123456789).radians() == 2.1547274519899178
+expect S1Angle.from_unsigned_e7(3000000000).radians() == -2.2601443020847993
+expect S1Angle.from_unsigned_e7(450000000).radians() == 0.78539816339744828
+expect S1Angle.from_unsigned_e7(0) == S1Angle.zero()

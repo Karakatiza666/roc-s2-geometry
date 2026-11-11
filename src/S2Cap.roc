@@ -100,6 +100,23 @@ S2Cap := { center : S2Point, radius : S1ChordAngle }.{
 	area : S2Cap -> F64
 	area = |cap| 2.0 * F64.pi * cap.height().max(0.0)
 
+	## The centroid of the cap, scaled by its area, so that the centroids of
+	## several caps can be summed.
+	##
+	## By symmetry it lies on the line from the origin to the centre of the cap.
+	## Its distance along that line is the midpoint of the distances that the
+	## cap spans, and this follows from the height. A cap that holds a single
+	## point has area zero, so it gives the zero vector. So does an empty cap.
+	centroid : S2Cap -> S2Point
+	centroid = |cap| {
+		if cap.is_empty() {
+			S2Point.zero()
+		} else {
+			r = 1.0 - 0.5 * cap.height()
+			cap.center * (r * cap.area())
+		}
+	}
+
 	## True when the cap contains no point.
 	is_empty : S2Cap -> Bool
 	is_empty = |cap| cap.radius.is_negative()
@@ -499,3 +516,22 @@ intersects_cell_interior = |cap, cell| {
 	}
 	$found
 }
+
+# The values below were printed by upstream's S2Cap::GetCentroid at v0.14.0
+# through tools/s2_oracle.cc.
+expect S2Cap.from_center_angle(S2Point.new(0.0, 0.0, 1.0), S1Angle.from_degrees(90.0)).centroid()
+	== S2Point.new(0.0, 0.0, 3.1415926535897931)
+expect S2Cap.from_center_angle(S2Point.new(1.0, 0.0, 0.0), S1Angle.from_degrees(30.0)).centroid().x()
+	== 0.78539816339744806
+expect {
+	cap = S2Cap.from_center_angle(
+		S2Point.new(0.2672612419124244, 0.5345224838248488, 0.8017837257372732),
+		S1Angle.from_degrees(10.0),
+	)
+	cap.centroid() == S2Point.new(0.025317820408404298, 0.050635640816808596, 0.075953461225212904)
+}
+# The full cap has its centroid at the origin, and a cap that holds one point,
+# or no point, has no area to weight it.
+expect S2Cap.full().centroid() == S2Point.zero()
+expect S2Cap.from_point(S2Point.new(0.0, 0.0, 1.0)).centroid() == S2Point.zero()
+expect S2Cap.empty().centroid() == S2Point.zero()

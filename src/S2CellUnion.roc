@@ -35,6 +35,47 @@ S2CellUnion := { ids : List(S2CellId) }.{
 	from_normalized_cell_ids : List(S2CellId) -> S2CellUnion
 	from_normalized_cell_ids = |ids| { ids: ids }
 
+	## The union of cells that are sorted and do not overlap, kept exactly as
+	## given.
+	##
+	## Unlike `from_normalized_cell_ids`, it does not need four sibling cells
+	## to have been replaced by their parent: the cells must pass `is_valid`
+	## but need not pass `is_normalized`. Some operations give other answers on
+	## a union that is not normalized, such as `contains_union`.
+	from_verbatim : List(S2CellId) -> S2CellUnion
+	from_verbatim = |ids| { ids: ids }
+
+	## The union of all the leaf cells from `min_id` to `max_id`, both
+	## included, as a normalized list of the fewest cells.
+	##
+	## Both ids must be leaf cells, with `min_id` not after `max_id`.
+	from_min_max : S2CellId, S2CellId -> S2CellUnion
+	from_min_max = |min_id, max_id| S2CellUnion.from_begin_end(min_id, max_id.next())
+
+	## The union of all the leaf cells from `begin` up to, but not including,
+	## `end`. When the two are equal, the union is empty.
+	##
+	## Both ids must be leaf cells, or the end of the leaf cells, with `begin`
+	## not after `end`.
+	from_begin_end : S2CellId, S2CellId -> S2CellUnion
+	from_begin_end = |begin, end| {
+		var $ids = []
+		var $id = begin.maximum_tile(end)
+		var $more = Bool.True
+		while $more and $id != end {
+			$ids = $ids.append($id)
+			next = $id.next().maximum_tile(end)
+			# Stop if the id wrapped past the last cell, which a valid range
+			# cannot do.
+			if next <= $id {
+				$more = Bool.False
+			} else {
+				$id = next
+			}
+		}
+		{ ids: $ids }
+	}
+
 	## The union that contains no cell.
 	empty : () -> S2CellUnion
 	empty = || { ids: [] }
@@ -603,4 +644,78 @@ difference_of_cell = |cell_id, other| {
 		}
 		$out
 	}
+}
+
+# The values below were printed by upstream's S2CellUnion at v0.14.0 through
+# tools/s2_oracle.cc.
+expect {
+	cases = [
+		{ min: 1451424208011999247, max: 1451424208011999253, ids: [1451424208011999247, 1451424208011999249, 1451424208011999251, 1451424208011999253] },
+		{ min: 12306037041796219737, max: 12306037041796219739, ids: [12306037041796219737, 12306037041796219739] },
+		{ min: 4646618397623473393, max: 4646618397623473593, ids: [4646618397623473396, 4646618397623473404, 4646618397623473472, 4646618397623473552, 4646618397623473572, 4646618397623473580, 4646618397623473588, 4646618397623473593] },
+		{ min: 568131930826271257, max: 568131930826271259, ids: [568131930826271257, 568131930826271259] },
+		{ min: 1072078284639251605, max: 1072078284639259797, ids: [1072078284639251605, 1072078284639251607, 1072078284639251612, 1072078284639251632, 1072078284639251664, 1072078284639251696, 1072078284639251776, 1072078284639251904, 1072078284639252224, 1072078284639253504, 1072078284639255552, 1072078284639257600, 1072078284639258880, 1072078284639259392, 1072078284639259712, 1072078284639259780, 1072078284639259788, 1072078284639259793, 1072078284639259795, 1072078284639259797] },
+		{ min: 3595489801276268683, max: 3595489801276268689, ids: [3595489801276268683, 3595489801276268685, 3595489801276268687, 3595489801276268689] },
+		{ min: 7357217347452862821, max: 7357217347452862825, ids: [7357217347452862821, 7357217347452862823, 7357217347452862825] },
+		{ min: 7802400414888526771, max: 7802400414888526773, ids: [7802400414888526771, 7802400414888526773] },
+		{ min: 7887724893851090945, max: 7887727092874346495, ids: [7887725993362718720] },
+		{ min: 2305843009213693953, max: 4611686018427387903, ids: [3458764513820540928] },
+		{ min: 1, max: 13835058055282163711, ids: [1152921504606846976, 3458764513820540928, 5764607523034234880, 8070450532247928832, 10376293541461622784, 12682136550675316736] },
+	]
+	cases.fold(
+		Bool.True,
+		|ok, c| {
+			got = S2CellUnion.from_min_max(S2CellId.from_id(c.min), S2CellId.from_id(c.max))
+			ok and got.cell_ids() == c.ids.map(S2CellId.from_id) and got.is_normalized()
+		},
+	)
+}
+expect {
+	cases = [
+		{ begin: 1451424208011999247, end: 1451424208011999255, ids: [1451424208011999247, 1451424208011999249, 1451424208011999251, 1451424208011999253] },
+		{ begin: 12306037041796219737, end: 12306037041796219741, ids: [12306037041796219737, 12306037041796219739] },
+		{ begin: 4646618397623473393, end: 4646618397623473595, ids: [4646618397623473396, 4646618397623473404, 4646618397623473472, 4646618397623473552, 4646618397623473572, 4646618397623473580, 4646618397623473588, 4646618397623473593] },
+		{ begin: 568131930826271257, end: 568131930826271261, ids: [568131930826271257, 568131930826271259] },
+		{ begin: 1072078284639251605, end: 1072078284639259799, ids: [1072078284639251605, 1072078284639251607, 1072078284639251612, 1072078284639251632, 1072078284639251664, 1072078284639251696, 1072078284639251776, 1072078284639251904, 1072078284639252224, 1072078284639253504, 1072078284639255552, 1072078284639257600, 1072078284639258880, 1072078284639259392, 1072078284639259712, 1072078284639259780, 1072078284639259788, 1072078284639259793, 1072078284639259795, 1072078284639259797] },
+		{ begin: 3595489801276268683, end: 3595489801276268691, ids: [3595489801276268683, 3595489801276268685, 3595489801276268687, 3595489801276268689] },
+		{ begin: 7357217347452862821, end: 7357217347452862827, ids: [7357217347452862821, 7357217347452862823, 7357217347452862825] },
+		{ begin: 7802400414888526771, end: 7802400414888526775, ids: [7802400414888526771, 7802400414888526773] },
+		{ begin: 1451424208011999247, end: 1451424208011999247, ids: [] },
+	]
+	cases.fold(
+		Bool.True,
+		|ok, c| {
+			got = S2CellUnion.from_begin_end(S2CellId.from_id(c.begin), S2CellId.from_id(c.end))
+			ok and got.cell_ids() == c.ids.map(S2CellId.from_id) and got.is_normalized()
+		},
+	)
+}
+expect {
+	# The end of the leaf cells is a valid end of a range.
+	last = S2CellId.end(30)
+	got = S2CellUnion.from_begin_end(S2CellId.begin(30), last)
+	got == S2CellUnion.whole_sphere()
+}
+expect {
+	# FromVerbatim keeps the cells it is given, and the flags are upstream's
+	# IsValid and IsNormalized.
+	cases = [
+		{ ids: [288230376151711744, 864691128455135232, 1441151880758558720, 2017612633061982208], valid: Bool.True, normalized: Bool.False },
+		{ ids: [1152921504606846976, 3458764513820540928], valid: Bool.True, normalized: Bool.True },
+		{ ids: [3458764513820540928, 1152921504606846976], valid: Bool.False, normalized: Bool.False },
+		{ ids: [1152921504606846976, 864691128455135232], valid: Bool.False, normalized: Bool.False },
+		{ ids: [], valid: Bool.True, normalized: Bool.True },
+		{ ids: [288230376151711744, 864691128455135232, 1441151880758558720, 3458764513820540928], valid: Bool.True, normalized: Bool.True },
+		{ ids: [288230376151711744, 288230376151711744], valid: Bool.False, normalized: Bool.False },
+		{ ids: [0], valid: Bool.False, normalized: Bool.False },
+		{ ids: [1152921504606846976, 99999], valid: Bool.False, normalized: Bool.False },
+	]
+	cases.fold(
+		Bool.True,
+		|ok, c| {
+			ids = c.ids.map(S2CellId.from_id)
+			got = S2CellUnion.from_verbatim(ids)
+			ok and got.cell_ids() == ids and got.is_valid() == c.valid and got.is_normalized() == c.normalized
+		},
+	)
 }

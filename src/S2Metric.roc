@@ -142,6 +142,16 @@ S2Metric := { deriv : F64, dim : U8 }.{
 	avg_area : S2Metric
 	avg_area = { deriv: 2.0943951023931953, dim: 2 }
 
+	## The largest ratio of the longest to the shortest edge of any cell at any
+	## level.
+	max_edge_aspect : F64
+	max_edge_aspect = 1.442615274452682920
+
+	## The largest ratio of the longest to the shortest diagonal of any cell at
+	## any level. It is true for every projection.
+	max_diag_aspect : F64
+	max_diag_aspect = 1.7320508075688772
+
 	is_eq : S2Metric, S2Metric -> Bool
 	is_eq = |a, b| a.deriv == b.deriv and a.dim == b.dim
 
@@ -149,6 +159,10 @@ S2Metric := { deriv : F64, dim : U8 }.{
 	to_inspect = |m| "S2Metric(deriv ${m.deriv.to_str()}, dim ${m.dim.to_str()})"
 }
 
+# Printed by upstream's S2::kMaxEdgeAspect and S2::kMaxDiagAspect at v0.14.0.
+expect S2Metric.max_edge_aspect == 1.442615274452683
+expect S2Metric.max_diag_aspect == 1.7320508075688772
+expect S2Metric.max_diag_aspect == F64.sqrt(3.0)
 expect S2Metric.avg_area.value_at(0) == 2.0943951023931953
 expect S2Metric.avg_area.value_at(1) == 2.0943951023931953 / 4.0
 expect S2Metric.max_edge.value_at(2) == 1.704897179199218452 / 4.0
