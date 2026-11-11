@@ -110,8 +110,11 @@ S2CellId := { id : U64 }.{
 	is_leaf = |c| c.id.bitwise_and(1) != 0
 
 	## The subdivision level, from 0 for a face cell to 30 for a leaf cell.
+	##
+	## Upstream does not define the level of the invalid id zero. Here it is 0.
 	level : S2CellId -> U64
-	level = |c| S2CellId.max_level - (c.id.count_trailing_zero_bits() / 2).to_u64()
+	level = |c|
+		S2CellId.max_level.minus_saturated((c.id.count_trailing_zero_bits() / 2).to_u64())
 
 	## Which of its parent's four children this cell is, in Hilbert order.
 	child_position : S2CellId -> U64
@@ -177,9 +180,13 @@ S2CellId := { id : U64 }.{
 	## Every descendant at the given level, in Hilbert order.
 	##
 	## The count is `4 ^ (level - this level)`, so this is only practical for
-	## a few levels down.
+	## a few levels down. The list is empty when `target_level` is coarser
+	## than this cell, or when the cell is not valid.
 	children_at_level : S2CellId, U64 -> List(S2CellId)
 	children_at_level = |c, target_level| {
+		if !c.is_valid() or target_level < c.level() or target_level > S2CellId.max_level {
+			return []
+		}
 		last = c.child_end_at_level(target_level)
 		step = S2CellId.lsb_for_level(target_level).shl_wrap(1)
 		var $current = c.child_begin_at_level(target_level).id
@@ -192,14 +199,24 @@ S2CellId := { id : U64 }.{
 	}
 
 	## The first leaf cell contained by this one, which is the smallest id in
-	## its range.
+	## its range. The invalid id zero has no range, so it gives itself.
 	range_min : S2CellId -> S2CellId
-	range_min = |c| { id: c.id.minus_wrap(c.lsb() - 1) }
+	range_min = |c|
+		if c.id == 0 {
+			c
+		} else {
+			{ id: c.id.minus_wrap(c.lsb() - 1) }
+		}
 
 	## The last leaf cell contained by this one, which is the largest id in
-	## its range.
+	## its range. The invalid id zero has no range, so it gives itself.
 	range_max : S2CellId -> S2CellId
-	range_max = |c| { id: c.id.plus_wrap(c.lsb() - 1) }
+	range_max = |c|
+		if c.id == 0 {
+			c
+		} else {
+			{ id: c.id.plus_wrap(c.lsb() - 1) }
+		}
 
 	## True when `other` is this cell or one of its descendants.
 	contains : S2CellId, S2CellId -> Bool
@@ -404,10 +421,13 @@ S2CellId := { id : U64 }.{
 		clamped_j = j.max(-1).min(max_i)
 
 		# The linear projection is enough here, since the result is only used
-		# to find which face the position lands on.
+		# to find which face the position lands on. The limit keeps the point
+		# barely outside the face rectangle, so that the reprojection cannot
+		# move it into the wrong leaf cell.
 		scale = 1.0 / S2CellId.max_size.to_f64()
-		u = scale * (clamped_i * 2 + 1 - max_i).to_f64()
-		v = scale * (clamped_j * 2 + 1 - max_i).to_f64()
+		limit = 1.0 + 2.220446049250313e-16
+		u = (scale * (2 * (clamped_i - max_i / 2) + 1).to_f64()).max(-limit).min(limit)
+		v = (scale * (2 * (clamped_j - max_i / 2) + 1).to_f64()).max(-limit).min(limit)
 
 		(new_face, uv) = S2Coords.xyz_to_face_uv(S2Coords.face_uv_to_xyz(face_index, u, v))
 		S2CellId.from_face_ij(
@@ -563,8 +583,8 @@ S2CellId := { id : U64 }.{
 	## Every cell at `nbr_level` that touches this cell's boundary, without
 	## the cell itself.
 	##
-	## `nbr_level` must be at least this cell's level. Neighbors that touch
-	## only at a corner are included once each.
+	## `nbr_level` must be at least this cell's level. At a corner of the cube
+	## the list can hold the same cell more than once.
 	all_neighbors : S2CellId, U64 -> List(S2CellId)
 	all_neighbors = |c, nbr_level| {
 		ij = c.to_face_ij_orientation()
@@ -643,12 +663,16 @@ S2CellId := { id : U64 }.{
 		}
 		$digits
 			.take_first($len)
-			.map(|d| S2CellId.hex_digits.get(d) ?? "0")
+			.map(|d| hex_digits.get(d) ?? "0")
 			|> Str.join_with("")
 	}
 
 	## The cell id a hex token names, or `Err(BadToken)` when the token is not
 	## 1 to 16 hex digits.
+	##
+	## The tokens `"X"` and `"0"` name the invalid id zero. Other tokens can
+	## name ids that are not valid, and `is_valid` tells them apart. Upstream
+	## gives the invalid id for a bad token, where this gives `Err`.
 	from_token : Str -> Try(S2CellId, [BadToken])
 	from_token = |token| {
 		if token == "X" {
@@ -660,7 +684,7 @@ S2CellId := { id : U64 }.{
 		}
 		var $value = 0
 		for byte in bytes {
-			digit = S2CellId.hex_value(byte)?
+			digit = hex_value(byte)?
 			$value = $value.shl_wrap(4).bitwise_or(digit)
 		}
 		Ok({ id: $value.shl_wrap((4 * (16 - bytes.len())).to_u8_wrap()) })
@@ -671,7 +695,7 @@ S2CellId := { id : U64 }.{
 	to_debug_str : S2CellId -> Str
 	to_debug_str = |c| {
 		if !c.is_valid() {
-			return "Invalid: ${c.id.to_str()}"
+			return "Invalid: ${hex16(c.id)}"
 		}
 		cell_level = c.level()
 		var $out = "${c.face().to_str()}/"
@@ -709,23 +733,6 @@ S2CellId := { id : U64 }.{
 		Ok($cell)
 	}
 
-	## The hex digit for a nibble.
-	hex_digits : List(Str)
-	hex_digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
-
-	## The nibble a hex digit byte stands for.
-	hex_value : U8 -> Try(U64, [BadToken])
-	hex_value = |byte|
-		if byte >= 48 and byte <= 57 {
-			Ok((byte - 48).to_u64())
-		} else if byte >= 97 and byte <= 102 {
-			Ok((byte - 87).to_u64())
-		} else if byte >= 65 and byte <= 70 {
-			Ok((byte - 55).to_u64())
-		} else {
-			Err(BadToken)
-		}
-
 	is_eq : S2CellId, S2CellId -> Bool
 	is_eq = |a, b| a.id == b.id
 
@@ -747,3 +754,64 @@ S2CellId := { id : U64 }.{
 	to_inspect : S2CellId -> Str
 	to_inspect = |c| "S2CellId(${c.to_token()})"
 }
+
+expect S2CellId.none().level() == 0 and !S2CellId.none().is_valid()
+expect S2CellId.none().range_min() == S2CellId.none() and S2CellId.none().range_max() == S2CellId.none()
+expect !S2CellId.none().contains(S2CellId.from_face(0)) and !S2CellId.none().intersects(S2CellId.from_face(0))
+expect S2CellId.from_token("X") == Ok(S2CellId.none())
+expect S2CellId.from_token("0") == Ok(S2CellId.none())
+expect {
+	c = S2CellId.from_token("2").ok_or(S2CellId.none())
+	!c.is_valid() and c.range_min().id() <= c.range_max().id() and c.level() <= 30
+}
+expect S2CellId.none().children_at_level(3) == [] and S2CellId.none().children().len() == 4
+expect S2CellId.from_face(0).child(1).children_at_level(0) == []
+expect S2CellId.from_face(0).child(1).children_at_level(1) == [S2CellId.from_face(0).child(1)]
+expect S2CellId.from_face(0).children_at_level(2).len() == 16
+expect {
+	# A position far outside the face still lands on a real neighbour face.
+	c = S2CellId.from_face_ij_wrap(0, -1, 5)
+	c.is_valid() and c.face() == 4
+}
+expect {
+	# At the face corner the clamped point is barely outside the face and the
+	# result is the same leaf as the unclamped corner.
+	c = S2CellId.from_face_ij_wrap(0, 1073741824, 1073741824)
+	c.is_valid() and c.is_leaf()
+}
+expect S2CellId.none().to_debug_str() == "Invalid: 0000000000000000"
+expect S2CellId.from_id(0xffffffffffffffff).to_debug_str() == "Invalid: ffffffffffffffff"
+expect S2CellId.from_face(2).child(3).to_debug_str() == "2/3"
+expect {
+	# Just across the u = -1 edge, the clamp keeps the leaf next to the edge
+	# cell at the far end of the edge. Without it the result is off by one.
+	S2CellId.from_face_ij_wrap(0, -1, 1073741823).to_token() == "8aaaaaaaaaaaaaab"
+}
+
+## The 16 hex digits of an id, with leading zeros.
+hex16 : U64 -> Str
+hex16 = |value| {
+	var $out = ""
+	for nibble_index in (0.U64).until(16) {
+		digit = value.shr_zf_wrap(((15 - nibble_index) * 4).to_u8_wrap()).bitwise_and(15)
+		$out = $out.concat(hex_digits.get(digit) ?? "0")
+	}
+	$out
+}
+
+## The hex digit for a nibble.
+hex_digits : List(Str)
+hex_digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+
+## The nibble a hex digit byte stands for.
+hex_value : U8 -> Try(U64, [BadToken])
+hex_value = |byte|
+	if byte >= 48 and byte <= 57 {
+		Ok((byte - 48).to_u64())
+	} else if byte >= 97 and byte <= 102 {
+		Ok((byte - 87).to_u64())
+	} else if byte >= 65 and byte <= 70 {
+		Ok((byte - 55).to_u64())
+	} else {
+		Err(BadToken)
+	}

@@ -9,7 +9,13 @@
 ##
 ## The technique is Shewchuk's, from "Adaptive Precision Floating-Point
 ## Arithmetic and Fast Robust Geometric Predicates" (1997). Every operation
-## below is error-free: no information is discarded at any step.
+## below is error-free: no information is discarded at any step, with one
+## limit. The error term of `two_product` is exact only when no partial
+## product underflows. A product with a magnitude below about 1e-290 can lose
+## bits of its error term, or become zero, because the error term becomes
+## subnormal. An operand with a magnitude above about 1e300 overflows in
+## `split`. The coordinates of unit-length points stay far from the overflow
+## limit, but a component that is almost zero can reach the underflow limit.
 ##
 ## Internal to this package.
 S2Exact := [].{

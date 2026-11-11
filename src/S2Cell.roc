@@ -89,7 +89,8 @@ S2Cell := { id : S2CellId, face : U64, level : U64, orientation : U64, uv : R2Re
 	## The `k`-th vertex, counterclockwise starting from the `(u_lo, v_lo)`
 	## corner. Not unit length.
 	vertex_raw : S2Cell, U64 -> S2Point
-	vertex_raw = |cell, k| {
+	vertex_raw = |cell, index| {
+		k = index.bitwise_and(3)
 		j = k.shr_zf_wrap(1)
 		i = j.bitwise_xor(k.bitwise_and(1))
 		S2Coords.face_uv_to_xyz(cell.face, cell.uv.x().bound(i), cell.uv.y().bound(j))
@@ -102,7 +103,8 @@ S2Cell := { id : S2CellId, face : U64, level : U64, orientation : U64, uv : R2Re
 	## The inward-facing normal of the great circle through the `k`-th edge,
 	## which runs from vertex `k` to vertex `k + 1`. Not unit length.
 	edge_raw : S2Cell, U64 -> S2Point
-	edge_raw = |cell, k|
+	edge_raw = |cell, index| {
+		k = index.bitwise_and(3)
 		if k == 0 {
 			S2Coords.v_norm(cell.face, cell.uv.y().lo())
 		} else if k == 1 {
@@ -112,6 +114,7 @@ S2Cell := { id : S2CellId, face : U64, level : U64, orientation : U64, uv : R2Re
 		} else {
 			-S2Coords.u_norm(cell.face, cell.uv.x().lo())
 		}
+	}
 
 	## The `k`-th edge normal as a unit vector.
 	edge : S2Cell, U64 -> S2Point
@@ -201,10 +204,14 @@ S2Cell := { id : S2CellId, face : U64, level : U64, orientation : U64, uv : R2Re
 	}
 
 	## True when the point lies inside the cell or on its boundary.
+	##
+	## The `(u, v)` bound grows by `F64` machine epsilon, which is the most
+	## error that the conversion to `(s, t)` can add. So the cell of a point
+	## always contains that point.
 	contains_point : S2Cell, S2Point -> Bool
 	contains_point = |cell, p|
 		match S2Coords.face_xyz_to_uv(cell.face, p) {
-			Ok(uv) => cell.uv.contains_point(uv)
+			Ok(uv) => cell.uv.expanded_by(2.220446049250313e-16).contains_point(uv)
 			Err(NotOnFace) => Bool.False
 		}
 
@@ -215,22 +222,6 @@ S2Cell := { id : S2CellId, face : U64, level : U64, orientation : U64, uv : R2Re
 	## True when either cell contains the other.
 	may_intersect_cell : S2Cell, S2Cell -> Bool
 	may_intersect_cell = |cell, other| cell.id.intersects(other.id)
-
-	## The latitude in radians of the corner at `(u_i, v_j)`.
-	latitude : S2Cell, U64, U64 -> F64
-	latitude = |cell, i, j|
-		S2LatLng.latitude(
-			S2Coords.face_uv_to_xyz(cell.face, cell.uv.x().bound(i), cell.uv.y().bound(j)),
-		)
-			.radians()
-
-	## The longitude in radians of the corner at `(u_i, v_j)`.
-	longitude : S2Cell, U64, U64 -> F64
-	longitude = |cell, i, j|
-		S2LatLng.longitude(
-			S2Coords.face_uv_to_xyz(cell.face, cell.uv.x().bound(i), cell.uv.y().bound(j)),
-		)
-			.radians()
 
 	## The distance from the point to the closest point of the cell, which is
 	## zero when the cell contains it.
@@ -254,15 +245,23 @@ S2Cell := { id : S2CellId, face : U64, level : U64, orientation : U64, uv : R2Re
 		$best
 	}
 
-	## The distance from the point to the furthest point of the cell, which is
-	## always one of its vertices.
+	## The distance from the point to the furthest point of the cell.
+	##
+	## When all four vertices are within a right angle of the point, the
+	## furthest point is a vertex. Otherwise the furthest point can lie on an
+	## edge or inside the cell, so the result is a straight angle minus the
+	## distance from the antipode of the point to the cell.
 	max_distance_to_point : S2Cell, S2Point -> S1ChordAngle
 	max_distance_to_point = |cell, p| {
 		var $worst = S1ChordAngle.negative()
 		for k in (0.U64).until(4) {
 			$worst = $worst.max(S1ChordAngle.from_points(p, cell.vertex(k)))
 		}
-		$worst
+		if $worst <= S1ChordAngle.right() {
+			$worst
+		} else {
+			S1ChordAngle.straight() - cell.distance_to_point(p.negate())
+		}
 	}
 
 	is_eq : S2Cell, S2Cell -> Bool
@@ -273,6 +272,11 @@ S2Cell := { id : S2CellId, face : U64, level : U64, orientation : U64, uv : R2Re
 }
 
 expect S2Cell.from_face(0).level() == 0
+expect {
+	# The furthest point of face 0 from (-1, 0, 0) is a full straight angle
+	# away, and it is not a vertex.
+	S2Cell.from_face(0).max_distance_to_point(S2Point.new(-1.0, 0.0, 0.0)).degrees() > 179.999999
+}
 expect S2Cell.from_face(3).face() == 3
 expect S2Cell.from_face(0).is_leaf() == Bool.False
 expect S2Cell.from_cell_id(S2CellId.from_face(0).child_begin_at_level(30)).is_leaf()
@@ -375,4 +379,24 @@ expect {
 expect {
 	cell = S2Cell.from_face(0)
 	cell.max_distance_to_point(S2Point.new(1.0, 0.0, 0.0)) >= cell.distance_to_point(S2Point.new(1.0, 0.0, 0.0))
+}
+expect S2Cell.from_face(1).vertex_raw(5) == S2Cell.from_face(1).vertex_raw(1)
+expect S2Cell.from_face(1).edge_raw(6) == S2Cell.from_face(1).edge_raw(2)
+expect S2Cell.from_face(1).edge(7) == S2Cell.from_face(1).edge(3)
+expect {
+	# Leaf cells of points near cell edges must contain those points.
+	points = [
+		S2Point.new(1.0, 1.0e-9, 1.0e-9),
+		S2Point.new(-0.3, 0.7, 0.2),
+		S2Point.new(0.1, 0.2, 0.9999999),
+		S2Point.new(1.0, 0.5, 0.5),
+	]
+	points.all(|p| S2Cell.from_cell_id(S2CellId.from_point(p)).contains_point(p.normalize()))
+}
+expect {
+	# A point just outside the u bound by less than epsilon is still inside.
+	cell = S2Cell.from_cell_id(S2CellId.from_face(0).child_begin_at_level(5))
+	hi = cell.bound_uv().x().hi()
+	p = S2Coords.face_uv_to_xyz(0, hi + 1.5e-16, cell.bound_uv().y().lo() + 0.001)
+	cell.contains_point(p)
 }

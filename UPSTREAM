@@ -21,14 +21,24 @@ s2geometry
              upstream's own answers for which shape contains which, degenerate
              cases included. Neither file is bundled.
 
+             tests/CoverCorpus.roc and the expected coverings in
+             src/S2RegionCoverer.roc come from running upstream's C++
+             S2RegionCoverer at this tag. tools/cover_oracle.cc is the driver,
+             linked against s2geometry v0.11.1 and abseil-cpp 20230802.1, and
+             tools/generate_corpus.py runs it. The corpus was generated with
+             libc++, whose priority queue decides the order of candidates
+             with equal priority.
+
 s2sphere
   https://github.com/sidewalklabs/s2sphere
   revision   master, 2026-08-30
   license    MIT
   role       an independent Python port of the same library, used only to
-             generate the golden corpora in tests/. Running it is what makes
-             the corpora a cross-check rather than a snapshot of this port's
-             own output. Not bundled, and not needed to build or test.
+             generate the golden corpora in tests/ other than CoverCorpus.
+             Running it is what makes the corpora a cross-check rather than a
+             snapshot of this port's own output. Its region coverer is the
+             older algorithm, so the cover corpus comes from upstream instead.
+             Not bundled, and not needed to build or test.
 
 Shewchuk, Jonathan Richard
   "Adaptive Precision Floating-Point Arithmetic and Fast Robust Geometric

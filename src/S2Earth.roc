@@ -21,13 +21,15 @@ S2Earth := [].{
 	radius_km : F64
 	radius_km = 6371.01
 
-	## The lowest point on land, the Dead Sea shore, in metres.
+	## The altitude of the lowest known point on Earth, the Challenger Deep,
+	## in metres above the surface of the spherical Earth.
 	lowest_altitude_meters : F64
 	lowest_altitude_meters = -10898.0
 
-	## The highest point on land, Mount Everest, in metres.
+	## The altitude of the highest known point on Earth, Mount Everest, in
+	## metres above the surface of the spherical Earth.
 	highest_altitude_meters : F64
-	highest_altitude_meters = 8848.0
+	highest_altitude_meters = 8846.0
 
 	## The distance along the surface subtended by an angle, in metres.
 	to_meters : S1Angle -> F64
@@ -44,6 +46,14 @@ S2Earth := [].{
 	## The angle subtended by a distance in kilometres.
 	from_km : F64 -> S1Angle
 	from_km = |km| S1Angle.from_radians(km / S2Earth.radius_km)
+
+	## The chord angle subtended by a distance in metres.
+	meters_to_chord_angle : F64 -> S1ChordAngle
+	meters_to_chord_angle = |meters| S1ChordAngle.from_angle(S2Earth.from_meters(meters))
+
+	## The chord angle subtended by a distance in kilometres.
+	km_to_chord_angle : F64 -> S1ChordAngle
+	km_to_chord_angle = |km| S1ChordAngle.from_angle(S2Earth.from_km(km))
 
 	## The distance a chord angle subtends, in metres.
 	chord_to_meters : S1ChordAngle -> F64
@@ -71,6 +81,11 @@ S2Earth := [].{
 	## square kilometres.
 	steradians_to_square_km : F64 -> F64
 	steradians_to_square_km = |steradians| steradians * S2Earth.radius_km * S2Earth.radius_km
+
+	## The solid angle in steradians subtended by an area in square
+	## kilometres.
+	square_km_to_steradians : F64 -> F64
+	square_km_to_steradians = |area| area / (S2Earth.radius_km * S2Earth.radius_km)
 
 	## The solid angle in steradians subtended by an area in square metres.
 	square_meters_to_steradians : F64 -> F64
@@ -102,3 +117,9 @@ expect {
 	total > 5.0e8 and total < 5.2e8
 }
 expect (S2Earth.square_meters_to_steradians(S2Earth.steradians_to_square_meters(0.5)) - 0.5).abs() < 1e-15
+expect S2Earth.lowest_altitude_meters == -10898.0
+expect S2Earth.highest_altitude_meters == 8846.0
+expect (S2Earth.meters_to_chord_angle(S2Earth.radius_meters).to_angle().radians() - 1.0).abs() < 1e-15
+expect (S2Earth.km_to_chord_angle(S2Earth.radius_km).to_angle().radians() - 1.0).abs() < 1e-15
+expect S2Earth.km_to_chord_angle(1.0e9).length2() == 4.0
+expect (S2Earth.square_km_to_steradians(S2Earth.radius_km * S2Earth.radius_km) - 1.0).abs() < 1e-15

@@ -104,8 +104,9 @@ containment already on `S2Cap`, `S2LatLngRect` and `S2CellUnion`. Upstream
 routes those through its index for speed; without one they cost the product of
 the two vertex counts, and the answers are the same.
 
-`src/Internal/` holds `S2Exact`, `S2Lookup` and `S2Math`. `main.roc` does not
-expose them: they are the port's own machinery, and no consumer names them.
+`src/Internal/` holds `S2Boundary`, `S2Exact`, `S2Lookup` and `S2Math`.
+`main.roc` does not expose them: they are the port's own machinery, and no
+consumer names them.
 
 | Path | What it is |
 | --- | --- |
@@ -144,6 +145,11 @@ covering : S2RegionCoverer, r -> List(S2CellId)
 `S2Cap`, `S2LatLngRect`, `S2CellUnion`, `S2Loop`, `S2Polyline` and `S2Polygon`
 all satisfy it, and so can a type of your own.
 
+The coverer starts from a few cells that cover the region's cap bound.
+Upstream does the same for every region except `S2Polygon`, which it bounds
+by the cells of its spatial index. This port has no such index, so a covering
+of a polygon can differ from upstream's.
+
 ## Exactness
 
 Orientation is the predicate everything else rests on: given three points, is
@@ -159,7 +165,10 @@ floating-point expansions, which represent a sum of products of doubles as a
 list of non-overlapping doubles and lose nothing at any step. That arithmetic
 lives in the package's internal `S2Exact`.
 Points that are exactly collinear are resolved by a symbolic perturbation, so
-the answer is never zero and never inconsistent.
+the answer is never zero and never inconsistent. The exact arithmetic has one
+limit: the error term of a product of two doubles is exact only while it does
+not underflow, so a product with a magnitude below about 1e-290 can lose bits
+or become zero.
 
 The costs of that fidelity are documented where they apply. `S2Point.robust_cross`
 uses the long-standing stable formulation rather than upstream's current
@@ -183,18 +192,21 @@ package and runs the examples against that bundle, served on localhost.
 GitHub Actions runs both on Linux x64 and arm64, macOS on Apple silicon and
 Intel, and Windows, against the pinned nightly.
 
-There are 649 assertions. `roc test src/main.roc` runs the 539 unit tests
+There are 766 assertions. `roc test src/main.roc` runs the 655 unit tests
 written alongside the modules they cover. `roc test tests/main.roc` runs the
-110 corpus sweeps, each of which walks every case in one golden corpus. It
+111 corpus sweeps, each of which walks every case in one golden corpus. It
 also runs the unit tests of every module the sweeps import, but not of a module
 none of them imports, so the script runs both.
 
 The corpora are what make this more than a self-consistency check. Four of them
 come from running [s2sphere](https://github.com/sidewalklabs/s2sphere), an
 independent Python port of the same C++ library, so the expected values come
-from a third implementation rather than from this one. Two are the tables out
-of upstream's own test suite, which is the reference answer for the containment
-predicates and is full of the degenerate cases those predicates get wrong:
+from a third implementation rather than from this one. `CoverCorpus` comes from
+upstream's own C++ `S2RegionCoverer` at v0.11.1. s2sphere ports an older
+version of that algorithm, which gives different coverings. Two are the tables
+out of upstream's own test suite, which is the reference answer for the
+containment predicates and is full of the degenerate cases those predicates get
+wrong:
 
 | Corpus | Cases | Checks |
 | --- | --- | --- |
@@ -202,7 +214,7 @@ predicates and is full of the degenerate cases those predicates get wrong:
 | `CellCorpus` | 150 | vertices, three area methods, rectangle and cap bounds |
 | `RegionCorpus` | 120 | cap and rectangle measures, their bounds, and their predicates against cells |
 | `CellUnionCorpus` | 60 | normalization, union, intersection, difference, containment |
-| `CoverCorpus` | 40 | coverings and interior coverings, cell for cell and in order |
+| `CoverCorpus` | 40 | coverings and interior coverings, cell for cell and in order, from upstream's C++ through `tools/cover_oracle.cc` |
 | `ExactCorpus` | 200 | determinant signs, against Python's rational arithmetic rather than another port |
 | `LoopRelationCorpus` | 86 | which of two loops contains the other, whether they are disjoint, and whether they cover the sphere, from `s2loop_test.cc` |
 | `PolygonCorpus` | 86 | polygon containment and intersection, nesting, and point containment, from `s2polygon_test.cc` |
@@ -224,7 +236,7 @@ To regenerate:
 
 ```
 pip install s2sphere
-python3 tools/generate_corpus.py
+python3 tools/generate_corpus.py --cover-oracle path/to/cover_oracle
 
 curl -sSLO https://raw.githubusercontent.com/google/s2geometry/v0.11.1/src/s2/s2loop_test.cc
 curl -sSLO https://raw.githubusercontent.com/google/s2geometry/v0.11.1/src/s2/s2polygon_test.cc
@@ -233,6 +245,18 @@ python3 tools/generate_polygon_corpus.py s2polygon_test.cc
 
 roc fmt tests
 ```
+
+`cover_oracle` is `tools/cover_oracle.cc` compiled and linked against
+s2geometry v0.11.1 and the abseil-cpp it builds with (20230802.1 works). The
+generator gives it the cases and reads back the coverings. Without
+`--cover-oracle`, the generator does not write `CoverCorpus`. With
+`--only cover`, it writes only `CoverCorpus` and does not need s2sphere.
+
+Upstream keeps the candidates in a `std::priority_queue`. Two candidates with
+the same priority leave it in an order that the C++ standard library decides,
+and that order can change which cells the budget allows. The port follows the
+heap of libc++, and the corpus was generated with libc++. A build of the
+oracle against libstdc++ can give a different covering for such a tie.
 
 ### Working with the nightly compiler
 
@@ -272,9 +296,10 @@ own, if it keeps upstream's notices. `NOTICE` keeps them, and
 | `tests/LoopRelationCorpus.roc`, `tests/PolygonCorpus.roc` | Apache-2.0, in `LICENSES/Apache-2.0.txt` |
 
 Those two corpora hold data extracted from upstream's `s2loop_test.cc` and
-`s2polygon_test.cc`, and they are not in the release bundle. The other four
+`s2polygon_test.cc`, and they are not in the release bundle. The other
 corpora are numbers this project generated by running
-[s2sphere](https://github.com/sidewalklabs/s2sphere) (MIT) and by evaluating
-determinants with Python's `fractions` module. Neither s2sphere nor the
-upstream test files are bundled. You need them only to regenerate the corpora,
+[s2sphere](https://github.com/sidewalklabs/s2sphere) (MIT), by running
+upstream's C++ region coverer through `tools/cover_oracle.cc`, and by
+evaluating determinants with Python's `fractions` module. Neither s2sphere nor
+upstream's source is bundled. You need them only to regenerate the corpora,
 never to build or test.

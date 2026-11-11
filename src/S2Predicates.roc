@@ -24,17 +24,6 @@ S2Predicates := [].{
 	max_det_error : F64
 	max_det_error = 4.057643110400022e-16
 
-	## `1`, `-1`, or `0` according to the sign of a double.
-	sign_of : F64 -> I8
-	sign_of = |x|
-		if x > 0.0 {
-			1
-		} else if x < 0.0 {
-			-1
-		} else {
-			0
-		}
-
 	## The orientation of the triangle `abc`: `1` when `c` is to the left of
 	## the directed great circle from `a` to `b`, and `-1` when it is to the
 	## right.
@@ -68,44 +57,6 @@ S2Predicates := [].{
 		}
 	}
 
-	## The second test: recompute the determinant from edge vectors, which
-	## cancels far less for nearly collinear points, and keep the answer only
-	## when it clears that formulation's own error bound.
-	##
-	## This settles almost every case that `triage_sign` cannot, leaving exact
-	## arithmetic for points that really are collinear.
-	stable_sign : S2Point, S2Point, S2Point -> I8
-	stable_sign = |a, b, c| {
-		ab = b - a
-		bc = c - b
-		ca = a - c
-		ab2 = ab.norm2()
-		bc2 = bc.norm2()
-		ca2 = ca.norm2()
-
-		# Permute so the longest edge comes first, which keeps the cross
-		# product as large as possible.
-		(det, max_error) =
-			if ab2 >= bc2 and ab2 >= ca2 {
-				(-ca.cross(bc).dot(c), 7.176703675781937e-16 * (ca2 * bc2).sqrt())
-			} else if bc2 >= ca2 {
-				(-ab.cross(ca).dot(a), 7.176703675781937e-16 * (ab2 * ca2).sqrt())
-			} else {
-				(-bc.cross(ab).dot(b), 7.176703675781937e-16 * (bc2 * ab2).sqrt())
-			}
-
-		# Below this the error bound itself has underflowed and says nothing.
-		if max_error < 1.0705260268167732e-169 {
-			0
-		} else if det.abs() <= max_error {
-			0
-		} else if det > 0.0 {
-			1
-		} else {
-			-1
-		}
-	}
-
 	## The escalation path taken when `triage_sign` is undecided.
 	expensive_sign : S2Point, S2Point, S2Point -> I8
 	expensive_sign = |a, b, c| {
@@ -114,7 +65,7 @@ S2Predicates := [].{
 		if a == b or b == c or c == a {
 			return 0
 		}
-		stable = S2Predicates.stable_sign(a, b, c)
+		stable = stable_sign(a, b, c)
 		if stable != 0 {
 			stable
 		} else {
@@ -141,35 +92,6 @@ S2Predicates := [].{
 		} else {
 			perm_sign * S2Predicates.symbolic_sign(pa, pb, pc)
 		}
-	}
-
-	## Sorts three points lexicographically, reporting the sign of the
-	## permutation alongside them.
-	sort3 : S2Point, S2Point, S2Point -> ((S2Point, S2Point, S2Point), I8)
-	sort3 = |a, b, c| {
-		var $x = a
-		var $y = b
-		var $z = c
-		var $sign = 1.I8
-		if $x > $y {
-			swapped = $x
-			$x = $y
-			$y = swapped
-			$sign = $sign.negate()
-		}
-		if $y > $z {
-			swapped = $y
-			$y = $z
-			$z = swapped
-			$sign = $sign.negate()
-		}
-		if $x > $y {
-			swapped = $x
-			$x = $y
-			$y = swapped
-			$sign = $sign.negate()
-		}
-		(($x, $y, $z), $sign)
 	}
 
 	## The sign of the determinant once every point has been nudged by its own
@@ -200,11 +122,11 @@ S2Predicates := [].{
 		if ca01 != 0 {
 			return ca01
 		}
-		cx = S2Predicates.sign_of(c.x())
+		cx = sign_of(c.x())
 		if cx != 0 {
 			return cx
 		}
-		cy = S2Predicates.sign_of(c.y())
+		cy = sign_of(c.y())
 		if cy != 0 {
 			return -cy
 		}
@@ -212,7 +134,7 @@ S2Predicates := [].{
 		if ca20 != 0 {
 			return ca20
 		}
-		cz = S2Predicates.sign_of(c.z())
+		cz = sign_of(c.z())
 		if cz != 0 {
 			return cz
 		}
@@ -221,15 +143,15 @@ S2Predicates := [].{
 		if ab01 != 0 {
 			return ab01
 		}
-		bx = S2Predicates.sign_of(b.x())
+		bx = sign_of(b.x())
 		if bx != 0 {
 			return -bx
 		}
-		by = S2Predicates.sign_of(b.y())
+		by = sign_of(b.y())
 		if by != 0 {
 			return by
 		}
-		ax = S2Predicates.sign_of(a.x())
+		ax = sign_of(a.x())
 		if ax != 0 {
 			return ax
 		}
@@ -263,10 +185,39 @@ S2Predicates := [].{
 		}
 		$sum >= 2
 	}
+
+	## Sorts three points lexicographically, reporting the sign of the
+	## permutation alongside them.
+	sort3 : S2Point, S2Point, S2Point -> ((S2Point, S2Point, S2Point), I8)
+	sort3 = |a, b, c| {
+		var $x = a
+		var $y = b
+		var $z = c
+		var $sign = 1.I8
+		if $x > $y {
+			swapped = $x
+			$x = $y
+			$y = swapped
+			$sign = $sign.negate()
+		}
+		if $y > $z {
+			swapped = $y
+			$y = $z
+			$z = swapped
+			$sign = $sign.negate()
+		}
+		if $x > $y {
+			swapped = $x
+			$x = $y
+			$y = swapped
+			$sign = $sign.negate()
+		}
+		(($x, $y, $z), $sign)
+	}
 }
 
-expect S2Predicates.sign_of(1.5) == 1
-expect S2Predicates.sign_of(-0.0) == 0
+expect sign_of(1.5) == 1
+expect sign_of(-0.0) == 0
 expect {
 	a = S2Point.new(1.0, 0.0, 0.0)
 	b = S2Point.new(0.0, 1.0, 0.0)
@@ -359,4 +310,53 @@ expect {
 	a = S2Point.new(1.0, 0.0, 0.0)
 	b = S2Point.new(0.0, 1.0, 0.0)
 	S2Predicates.angle_contains_vertex(a, b, a) == Bool.False
+}
+
+## `1`, `-1`, or `0` according to the sign of a double.
+sign_of : F64 -> I8
+sign_of = |x|
+	if x > 0.0 {
+		1
+	} else if x < 0.0 {
+		-1
+	} else {
+		0
+	}
+
+## The second test: recompute the determinant from edge vectors, which
+## cancels far less for nearly collinear points, and keep the answer only
+## when it clears that formulation's own error bound.
+##
+## This settles almost every case that `triage_sign` cannot, leaving exact
+## arithmetic for points that really are collinear.
+stable_sign : S2Point, S2Point, S2Point -> I8
+stable_sign = |a, b, c| {
+	ab = b - a
+	bc = c - b
+	ca = a - c
+	ab2 = ab.norm2()
+	bc2 = bc.norm2()
+	ca2 = ca.norm2()
+
+	# Permute so the longest edge comes first, which keeps the cross
+	# product as large as possible.
+	(det, max_error) =
+		if ab2 >= bc2 and ab2 >= ca2 {
+			(-ca.cross(bc).dot(c), 7.176703675781937e-16 * (ca2 * bc2).sqrt())
+		} else if bc2 >= ca2 {
+			(-ab.cross(ca).dot(a), 7.176703675781937e-16 * (ab2 * ca2).sqrt())
+		} else {
+			(-bc.cross(ab).dot(b), 7.176703675781937e-16 * (bc2 * ab2).sqrt())
+		}
+
+	# Below this the error bound itself has underflowed and says nothing.
+	if max_error < 1.0705260268167732e-169 {
+		0
+	} else if det.abs() <= max_error {
+		0
+	} else if det > 0.0 {
+		1
+	} else {
+		-1
+	}
 }

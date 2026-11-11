@@ -32,8 +32,8 @@ S2Metric := { deriv : F64, dim : U8 }.{
 	value_at : S2Metric, U64 -> F64
 	value_at = |m, level| S2Math.ldexp(m.deriv, -(m.dim.to_i32() * level.to_i32_wrap()))
 
-	## The finest level at which the metric is still at most `value`, or level
-	## 30 when no level is coarse enough.
+	## The coarsest level at which the metric is still at most `value`, or
+	## level 30 when no level is fine enough.
 	##
 	## `max_diag.min_level_for(0.1)` is the coarsest cells whose diagonals are
 	## all 0.1 or shorter.
@@ -48,8 +48,8 @@ S2Metric := { deriv : F64, dim : U8 }.{
 		S2Math.clamp_i64(level.to_i64(), 0, S2CellId.max_level.to_i64_wrap()).to_u64_wrap()
 	}
 
-	## The coarsest level at which the metric is still at least `value`, or
-	## level 0 when no level is fine enough.
+	## The finest level at which the metric is still at least `value`, or
+	## level 0 when no level is coarse enough.
 	max_level_for : S2Metric, F64 -> U64
 	max_level_for = |m, value| {
 		if value <= 0.0 {

@@ -106,51 +106,20 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 			}
 
 			max_error = 4.440892098500626e-16
-			cell_lat = R1Interval.from_point_pair(cell.latitude(i, j), cell.latitude(1 - i, 1 - j))
+			cell_lat = R1Interval.from_point_pair(cell_latitude(cell, i, j), cell_latitude(cell, 1 - i, 1 - j))
 				.expanded(max_error)
 				.intersection(S2LatLngRect.full_lat())
 			if cell_lat.lo() == -0.5 * F64.pi or cell_lat.hi() == 0.5 * F64.pi {
 				{ lat: cell_lat, lng: S1Interval.full() }
 			} else {
 				cell_lng = S1Interval.from_point_pair(
-					cell.longitude(i, 1 - j),
-					cell.longitude(1 - i, j),
+					cell_longitude(cell, i, 1 - j),
+					cell_longitude(cell, 1 - i, j),
 				)
 				{ lat: cell_lat, lng: cell_lng.expanded(max_error) }
 			}
 		} else {
-			S2LatLngRect.face_rect(cell.face())
-		}
-	}
-
-	## The bounding rectangle of a whole cube face, which is exact.
-	face_rect : U64 -> S2LatLngRect
-	face_rect = |face_index| {
-		quarter = 0.25 * F64.pi
-		third : F64
-		third = 1.0 / 3.0
-		pole_min_lat = third.sqrt().asin()
-		if face_index == 0 {
-			{ lat: R1Interval.new(-quarter, quarter), lng: S1Interval.new(-quarter, quarter) }
-		} else if face_index == 1 {
-			{
-				lat: R1Interval.new(-quarter, quarter),
-				lng: S1Interval.new(quarter, 3.0 * quarter),
-			}
-		} else if face_index == 2 {
-			{ lat: R1Interval.new(pole_min_lat, 0.5 * F64.pi), lng: S1Interval.full() }
-		} else if face_index == 3 {
-			{
-				lat: R1Interval.new(-quarter, quarter),
-				lng: S1Interval.new(3.0 * quarter, -3.0 * quarter),
-			}
-		} else if face_index == 4 {
-			{
-				lat: R1Interval.new(-quarter, quarter),
-				lng: S1Interval.new(-3.0 * quarter, -quarter),
-			}
-		} else {
-			{ lat: R1Interval.new(-0.5 * F64.pi, -pole_min_lat), lng: S1Interval.full() }
+			face_rect(cell.face())
 		}
 	}
 
@@ -354,15 +323,54 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 	##
 	## This is the right way to grow a rectangle by a distance: unlike
 	## `expanded`, the amount of longitude added grows towards the poles.
+	##
+	## A negative `angle` shrinks the rectangle instead, to the rectangle that
+	## holds every point whose distance to the outside is at least `-angle`.
+	## The result is empty when nothing is left. A rectangle with a full
+	## longitude interval keeps the pole it touches, as that pole has no
+	## boundary.
 	convolve_with_cap : S2LatLngRect, S1Angle -> S2LatLngRect
 	convolve_with_cap = |r, angle| {
-		cap = S2Cap.from_center_angle(S2Point.new(1.0, 0.0, 0.0), angle)
-		var $out = r
-		for k in (0.U64).until(4) {
-			vertex_cap = S2Cap.from_center_chord_angle(r.vertex(k).to_point(), cap.radius())
-			$out = $out.union(S2LatLngRect.from_cap(vertex_cap))
+		if angle.radians() >= 0.0 {
+			cap = S2Cap.from_center_angle(S2Point.new(1.0, 0.0, 0.0), angle)
+			var $out = r
+			for k in (0.U64).until(4) {
+				vertex_cap = S2Cap.from_center_chord_angle(r.vertex(k).to_point(), cap.radius())
+				$out = $out.union(S2LatLngRect.from_cap(vertex_cap))
+			}
+			$out
+		} else {
+			half_pi = 0.5 * F64.pi
+			distance = angle.radians()
+			lat_result = R1Interval.new(
+				if r.lat.lo() <= -half_pi and r.lng.is_full() {
+					-half_pi
+				} else {
+					r.lat.lo() - distance
+				},
+				if r.lat.hi() >= half_pi and r.lng.is_full() {
+					half_pi
+				} else {
+					r.lat.hi() + distance
+				},
+			)
+			if lat_result.is_empty() {
+				return S2LatLngRect.empty()
+			}
+			# The cap occupies its largest longitude interval at the latitude of
+			# greatest magnitude. The law of sines for spherical triangles gives
+			# that interval, and a cap that reaches the pole spans a quarter turn.
+			max_abs_lat = (-lat_result.lo()).max(lat_result.hi())
+			sin_a = (-distance).sin()
+			sin_c = max_abs_lat.cos()
+			max_lng_margin = if (sin_a < sin_c) (sin_a / sin_c).asin() else half_pi
+			lng_result = r.lng.expanded(-max_lng_margin)
+			if lng_result.is_empty() {
+				S2LatLngRect.empty()
+			} else {
+				{ lat: lat_result, lng: lng_result }
+			}
 		}
-		$out
 	}
 
 	## The bounding cap of the rectangle.
@@ -382,7 +390,7 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 			}
 		pole_cap = S2Cap.from_center_angle(
 			S2Point.new(0.0, 0.0, pole_z),
-			S1Angle.from_radians(pole_angle),
+			S1Angle.from_radians((1.0 + 2.0 * 2.220446049250313e-16) * pole_angle),
 		)
 
 		lng_span = r.lng.hi() - r.lng.lo()
@@ -455,79 +463,23 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 				edge_lng = S1Interval.from_point_pair(a_ll.lng_radians(), b_ll.lng_radians())
 				if r.lng.intersects(edge_lng) {
 					if edge_lng.contains_point(r.lng.lo())
-						and S2LatLngRect.intersects_lng_edge(a, b, r.lat, r.lng.lo()) {
+						and intersects_lng_edge(a, b, r.lat, r.lng.lo()) {
 						$hit = Bool.True
 					}
 					if edge_lng.contains_point(r.lng.hi())
-						and S2LatLngRect.intersects_lng_edge(a, b, r.lat, r.lng.hi()) {
+						and intersects_lng_edge(a, b, r.lat, r.lng.hi()) {
 						$hit = Bool.True
 					}
-					if S2LatLngRect.intersects_lat_edge(a, b, r.lat.lo(), r.lng) {
+					if intersects_lat_edge(a, b, r.lat.lo(), r.lng) {
 						$hit = Bool.True
 					}
-					if S2LatLngRect.intersects_lat_edge(a, b, r.lat.hi(), r.lng) {
+					if intersects_lat_edge(a, b, r.lat.hi(), r.lng) {
 						$hit = Bool.True
 					}
 				}
 			}
 		}
 		$hit
-	}
-
-	## True when the edge `ab` crosses the meridian segment at `lng` spanning
-	## `lat`.
-	intersects_lng_edge : S2Point, S2Point, R1Interval, F64 -> Bool
-	intersects_lng_edge = |a, b, lat_span, meridian|
-		S2Edge.simple_crossing(
-			a,
-			b,
-			S2LatLng.from_radians(lat_span.lo(), meridian).to_point(),
-			S2LatLng.from_radians(lat_span.hi(), meridian).to_point(),
-		)
-
-	## True when the edge `ab` crosses the parallel at `lat` spanning `lng`.
-	intersects_lat_edge : S2Point, S2Point, F64, S1Interval -> Bool
-	intersects_lat_edge = |a, b, parallel, lng_span| {
-		# Build a frame whose z axis is normal to the edge's great circle, so
-		# that the edge becomes an angle interval in that frame.
-		z0 = a.robust_cross(b).normalize()
-		z = if z0.z() < 0.0 {
-			-z0
-		} else {
-			z0
-		}
-		y = z.robust_cross(S2Point.new(0.0, 0.0, 1.0)).normalize()
-		x = y.cross(z)
-
-		sin_lat = parallel.sin()
-		if sin_lat.abs() >= x.z() {
-			return Bool.False
-		}
-		cos_theta = sin_lat / x.z()
-		sin_theta = (1.0 - cos_theta * cos_theta).sqrt()
-		theta = S2Math.atan2(sin_theta, cos_theta)
-
-		ab_theta = S1Interval.from_point_pair(
-			S2Math.atan2(a.dot(y), a.dot(x)),
-			S2Math.atan2(b.dot(y), b.dot(x)),
-		)
-
-		first =
-			if ab_theta.contains_point(theta) {
-				isect = x * cos_theta + y * sin_theta
-				lng_span.contains_point(S2Math.atan2(isect.y(), isect.x()))
-			} else {
-				Bool.False
-			}
-		if first {
-			return Bool.True
-		}
-		if ab_theta.contains_point(-theta) {
-			isect = x * cos_theta - y * sin_theta
-			lng_span.contains_point(S2Math.atan2(isect.y(), isect.x()))
-		} else {
-			Bool.False
-		}
 	}
 
 	approx_eq : S2LatLngRect, S2LatLngRect, F64 -> Bool
@@ -654,6 +606,19 @@ expect {
 	failures == 0
 }
 expect S2LatLngRect.empty().cap_bound().is_empty()
+expect {
+	# The pole cap is padded, so its radius exceeds the exact polar distance.
+	r = S2LatLngRect.new(R1Interval.new(0.5, 1.0), S1Interval.full())
+	r.cap_bound().radius_angle().radians() > 0.5 * F64.pi - 0.5
+}
+expect {
+	# The level 0 polar bound is padded below the exact latitude by both the
+	# constant adjustment and the final expansion, about 3.3e-16 in all.
+	lo = S2LatLngRect.from_cell(S2Cell.from_face(2)).lat.lo()
+	third : F64
+	third = 1.0 / 3.0
+	third.sqrt().asin() - lo > 3.0e-16
+}
 expect S2LatLngRect.full().contains_cell(S2Cell.from_face(0))
 expect S2LatLngRect.full().may_intersect_cell(S2Cell.from_face(0))
 expect S2LatLngRect.full().intersects_cell(S2Cell.from_face(0))
@@ -670,3 +635,144 @@ expect {
 	grown.contains_lat_lng(S2LatLng.from_degrees(4.0, 0.0))
 		and grown.contains_lat_lng(S2LatLng.from_degrees(0.0, 4.0))
 }
+expect {
+	# A negative distance shrinks the rectangle. Latitude shrinks by exactly
+	# the distance. Longitude shrinks by asin(sin(2 deg) / cos(8 deg)), the
+	# half width of a 2 degree cap at the latitude of greatest magnitude.
+	r = S2LatLngRect.from_bounds(S2LatLng.from_degrees(-10.0, -10.0), S2LatLng.from_degrees(10.0, 10.0))
+	shrunk = r.convolve_with_cap(S1Angle.from_degrees(-2.0))
+	margin = 0.0352497734976641
+	ten_degrees = 10.0 * (F64.pi / 180.0)
+	(shrunk.lat().lo() + 8.0 * (F64.pi / 180.0)).abs() < 1e-15
+		and (shrunk.lat().hi() - 8.0 * (F64.pi / 180.0)).abs() < 1e-15
+		and (shrunk.lng().lo() - (margin - ten_degrees)).abs() < 1e-14
+		and (shrunk.lng().hi() - (ten_degrees - margin)).abs() < 1e-14
+}
+expect {
+	# Shrinking by more than half the height leaves nothing.
+	r = S2LatLngRect.from_bounds(S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(1.0, 10.0))
+	r.convolve_with_cap(S1Angle.from_degrees(-1.0)).is_empty()
+}
+expect {
+	# A rectangle with every longitude has no boundary at the pole it touches.
+	r = S2LatLngRect.new(R1Interval.new(80.0 * (F64.pi / 180.0), 0.5 * F64.pi), S1Interval.full())
+	shrunk = r.convolve_with_cap(S1Angle.from_degrees(-5.0))
+	shrunk.lng().is_full()
+		and shrunk.lat().hi() == 0.5 * F64.pi
+		and (shrunk.lat().lo() - 85.0 * (F64.pi / 180.0)).abs() < 1e-15
+}
+expect {
+	# The meridian segment at longitude 0 from the equator to latitude 45
+	# degrees is crossed by an edge running east to west across latitude 20.
+	a = S2LatLng.from_degrees(20.0, -5.0).to_point()
+	b = S2LatLng.from_degrees(20.0, 5.0).to_point()
+	lat_span = R1Interval.new(0.0, 0.25 * F64.pi)
+	intersects_lng_edge(a, b, lat_span, 0.0)
+		and !intersects_lng_edge(a, b, lat_span, 0.5)
+}
+
+## The bounding rectangle of a whole cube face, which is exact.
+face_rect : U64 -> S2LatLngRect
+face_rect = |face_index| {
+	quarter = 0.25 * F64.pi
+	third : F64
+	third = 1.0 / 3.0
+	# The error in this calculation is at most half an epsilon.
+	pole_min_lat = third.sqrt().asin() - 0.5 * 2.220446049250313e-16
+	bound = if face_index == 0 {
+		{ lat: R1Interval.new(-quarter, quarter), lng: S1Interval.new(-quarter, quarter) }
+	} else if face_index == 1 {
+		{
+			lat: R1Interval.new(-quarter, quarter),
+			lng: S1Interval.new(quarter, 3.0 * quarter),
+		}
+	} else if face_index == 2 {
+		{ lat: R1Interval.new(pole_min_lat, 0.5 * F64.pi), lng: S1Interval.full() }
+	} else if face_index == 3 {
+		{
+			lat: R1Interval.new(-quarter, quarter),
+			lng: S1Interval.new(3.0 * quarter, -3.0 * quarter),
+		}
+	} else if face_index == 4 {
+		{
+			lat: R1Interval.new(-quarter, quarter),
+			lng: S1Interval.new(-3.0 * quarter, -quarter),
+		}
+	} else {
+		{ lat: R1Interval.new(-0.5 * F64.pi, -pole_min_lat), lng: S1Interval.full() }
+	}
+	# Allow for the error when a contained point is converted to latitude.
+	S2LatLngRect.expanded(bound, S2LatLng.from_radians(2.220446049250313e-16, 0.0))
+}
+
+## True when the edge `ab` crosses the meridian segment at `lng` spanning
+## `lat`.
+intersects_lng_edge : S2Point, S2Point, R1Interval, F64 -> Bool
+intersects_lng_edge = |a, b, lat_span, meridian|
+	S2Edge.crossing_sign(
+		a,
+		b,
+		S2LatLng.from_radians(lat_span.lo(), meridian).to_point(),
+		S2LatLng.from_radians(lat_span.hi(), meridian).to_point(),
+	) > 0
+
+## True when the edge `ab` crosses the parallel at `lat` spanning `lng`.
+intersects_lat_edge : S2Point, S2Point, F64, S1Interval -> Bool
+intersects_lat_edge = |a, b, parallel, lng_span| {
+	# Build a frame whose z axis is normal to the edge's great circle, so
+	# that the edge becomes an angle interval in that frame.
+	z0 = a.robust_cross(b).normalize()
+	z = if z0.z() < 0.0 {
+		-z0
+	} else {
+		z0
+	}
+	y = z.robust_cross(S2Point.new(0.0, 0.0, 1.0)).normalize()
+	x = y.cross(z)
+
+	sin_lat = parallel.sin()
+	if sin_lat.abs() >= x.z() {
+		return Bool.False
+	}
+	cos_theta = sin_lat / x.z()
+	sin_theta = (1.0 - cos_theta * cos_theta).sqrt()
+	theta = S2Math.atan2(sin_theta, cos_theta)
+
+	ab_theta = S1Interval.from_point_pair(
+		S2Math.atan2(a.dot(y), a.dot(x)),
+		S2Math.atan2(b.dot(y), b.dot(x)),
+	)
+
+	first =
+		if ab_theta.contains_point(theta) {
+			isect = x * cos_theta + y * sin_theta
+			lng_span.contains_point(S2Math.atan2(isect.y(), isect.x()))
+		} else {
+			Bool.False
+		}
+	if first {
+		return Bool.True
+	}
+	if ab_theta.contains_point(-theta) {
+		isect = x * cos_theta - y * sin_theta
+		lng_span.contains_point(S2Math.atan2(isect.y(), isect.x()))
+	} else {
+		Bool.False
+	}
+}
+
+## The latitude in radians of the corner of `cell` at `(u_i, v_j)`.
+cell_latitude : S2Cell, U64, U64 -> F64
+cell_latitude = |cell, i, j|
+	S2LatLng.latitude(
+		S2Coords.face_uv_to_xyz(cell.face(), cell.bound_uv().x().bound(i), cell.bound_uv().y().bound(j)),
+	)
+		.radians()
+
+## The longitude in radians of the corner of `cell` at `(u_i, v_j)`.
+cell_longitude : S2Cell, U64, U64 -> F64
+cell_longitude = |cell, i, j|
+	S2LatLng.longitude(
+		S2Coords.face_uv_to_xyz(cell.face(), cell.bound_uv().x().bound(i), cell.bound_uv().y().bound(j)),
+	)
+		.radians()

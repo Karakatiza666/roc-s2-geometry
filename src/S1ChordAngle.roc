@@ -15,8 +15,10 @@ import S2Point
 S1ChordAngle := { length2 : F64 }.{
 
 	## The chord angle whose squared chord length is `length2`.
+	## The chord angle whose squared chord length is `length2`, which is
+	## capped at 4 (180 degrees). A negative value stays as it is.
 	from_length2 : F64 -> S1ChordAngle
-	from_length2 = |length2| { length2: length2 }
+	from_length2 = |length2| { length2: length2.min(4.0) }
 
 	## The chord angle equal to `angle`, clamped to `[0, pi]`.
 	##

@@ -5,6 +5,7 @@ import S2Cell
 import S2Edge
 import S2LatLng
 import S2LatLngRect
+import Internal/S2Boundary
 import S2Point
 
 ## A sequence of points joined by geodesic edges.
@@ -85,6 +86,11 @@ S2Polyline := { vertices : List(S2Point) }.{
 
 	## The centroid of the polyline, scaled by its length so that centroids of
 	## several polylines can be summed.
+	##
+	## Each edge adds upstream's `S2::TrueCentroid(a, b)`: a vector towards
+	## the edge's midpoint whose length is twice the sine of half the edge
+	## angle. That is the chord length, not the arc length. The result is not
+	## a unit vector; normalize it to get a direction.
 	centroid : S2Polyline -> S2Point
 	centroid = |line| {
 		var $sum = S2Point.zero()
@@ -92,9 +98,15 @@ S2Polyline := { vertices : List(S2Point) }.{
 		while $i < line.vertices.len() {
 			previous = line.vertices.get($i - 1) ?? S2Point.zero()
 			current = line.vertices.get($i) ?? S2Point.zero()
-			# The midpoint scaled by the edge length, which is the exact line
-			# integral over the edge.
-			$sum = $sum + (previous + current).normalize() * previous.angle_to(current).radians()
+			# |a - b| is 2 sin(theta) and |a + b| is 2 cos(theta), where theta
+			# is half the edge angle, so this scales a + b to length
+			# 2 sin(theta). An antipodal edge has no midpoint and adds nothing.
+			sum = previous + current
+			cos2 = sum.norm2()
+			if cos2 != 0.0 {
+				sin2 = (previous - current).norm2()
+				$sum = $sum + sum * (sin2 / cos2).sqrt()
+			}
 			$i = $i + 1
 		}
 		$sum
@@ -214,9 +226,19 @@ S2Polyline := { vertices : List(S2Point) }.{
 		S1ChordAngle.from_points(p, closest)
 	}
 
-	## True when any edge of this polyline crosses any edge of the other.
+	## True when any edge of this polyline crosses or touches any edge of the
+	## other.
+	##
+	## Polylines that share a vertex, or where an endpoint of one lies on the
+	## other, intersect.
 	intersects_polyline : S2Polyline, S2Polyline -> Bool
 	intersects_polyline = |line, other| {
+		if line.vertices.is_empty() or other.vertices.is_empty() {
+			return Bool.False
+		}
+		if !line.rect_bound().intersects_rect(other.rect_bound()) {
+			return Bool.False
+		}
 		var $hit = Bool.False
 		var $i = 1
 		while $i < line.vertices.len() {
@@ -226,7 +248,7 @@ S2Polyline := { vertices : List(S2Point) }.{
 			while $j < other.vertices.len() {
 				c = other.vertices.get($j - 1) ?? S2Point.zero()
 				d = other.vertices.get($j) ?? S2Point.zero()
-				if S2Edge.crossing_sign(a, b, c, d) > 0 {
+				if S2Edge.crossing_sign(a, b, c, d) >= 0 {
 					$hit = Bool.True
 				}
 				$j = $j + 1
@@ -236,29 +258,18 @@ S2Polyline := { vertices : List(S2Point) }.{
 		$hit
 	}
 
-	## The bounding rectangle of the polyline's vertices.
+	## The bounding rectangle of the polyline, valid for its edges as well as
+	## its vertices.
 	##
-	## Bounds the vertices rather than the edges, so an edge that bulges
-	## polewards between two vertices may leave it. Grow the result with
-	## `convolve_with_cap` if that matters.
+	## A geodesic edge bulges polewards of its endpoints, so the rectangle
+	## includes the highest and lowest latitude each edge reaches.
 	rect_bound : S2Polyline -> S2LatLngRect
-	rect_bound = |line| {
-		var $bound = S2LatLngRect.empty()
-		for v in line.vertices {
-			$bound = $bound.add_point(v)
-		}
-		$bound
-	}
+	rect_bound = |line| S2Boundary.chain_bound(line.vertices)
 
-	## The bounding cap of the polyline's vertices.
+	## The bounding cap of the polyline: the cap around its rectangle bound,
+	## as upstream computes it.
 	cap_bound : S2Polyline -> S2Cap
-	cap_bound = |line| {
-		var $cap = S2Cap.empty()
-		for v in line.vertices {
-			$cap = $cap.add_point(v)
-		}
-		$cap
-	}
+	cap_bound = |line| line.rect_bound().cap_bound()
 
 	## Always false: a polyline has no interior, so it contains no cell.
 	contains_cell : S2Polyline, S2Cell -> Bool
@@ -414,10 +425,31 @@ expect {
 expect {
 	line = S2Polyline.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 90.0)])
 	c = line.centroid()
-	(c.norm() - 0.5 * F64.pi).abs() < 1e-13
+	# A 90-degree edge adds a vector of length 2 sin(45 degrees), so its
+	# squared length is 2.
+	(c.norm2() - 2.0).abs() < 1e-13
 		and S2LatLng.from_point(c).approx_eq(S2LatLng.from_degrees(0.0, 45.0), 1e-13)
 }
 expect {
 	a = S2Polyline.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 10.0)])
 	a.approx_eq(a, 1e-15) and !a.approx_eq(S2Polyline.empty(), 1e-15)
+}
+expect {
+	# Polylines that only share a vertex, or where one ends on the other,
+	# still intersect.
+	a = S2Polyline.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 10.0)])
+	b = S2Polyline.from_lat_lngs([S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(10.0, 10.0)])
+	c = S2Polyline.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(-10.0, -10.0)])
+	a.intersects_polyline(b) and b.intersects_polyline(a) and a.intersects_polyline(c)
+		and !b.intersects_polyline(c)
+		and !a.intersects_polyline(S2Polyline.empty())
+}
+expect {
+	# An edge along the 10th parallel bulges north of it between its ends.
+	# The bounds must hold the edge's midpoint, not only its vertices.
+	line = S2Polyline.from_lat_lngs([S2LatLng.from_degrees(10.0, -20.0), S2LatLng.from_degrees(10.0, 20.0)])
+	mid = line.interpolate(0.5)
+	line.rect_bound().contains_point(mid)
+		and line.rect_bound().lat_hi().degrees() > 10.5
+		and line.cap_bound().contains_point(mid)
 }

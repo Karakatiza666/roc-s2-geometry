@@ -11,10 +11,6 @@ import S2Predicates
 ## rather than on comparisons of rounded determinants.
 S2Edge := [].{
 
-	## The error bound on the tangent test in `crossing_sign`.
-	tangent_error : F64
-	tangent_error = 4.612644198131179e-16
-
 	## How the edges `ab` and `cd` meet.
 	##
 	## - `1` when they cross at a point interior to both
@@ -39,8 +35,8 @@ S2Edge := [].{
 		norm = a.robust_cross(b)
 		a_tangent = a.cross(norm)
 		b_tangent = norm.cross(b)
-		beyond_a = c.dot(a_tangent) > S2Edge.tangent_error and d.dot(a_tangent) > S2Edge.tangent_error
-		beyond_b = c.dot(b_tangent) > S2Edge.tangent_error and d.dot(b_tangent) > S2Edge.tangent_error
+		beyond_a = c.dot(a_tangent) > tangent_error and d.dot(a_tangent) > tangent_error
+		beyond_b = c.dot(b_tangent) > tangent_error and d.dot(b_tangent) > tangent_error
 		if beyond_a or beyond_b {
 			return -1
 		}
@@ -112,25 +108,6 @@ S2Edge := [].{
 		} else {
 			S2Edge.vertex_crossing(a, b, c, d)
 		}
-	}
-
-	## A crossing test that uses only rounded arithmetic.
-	##
-	## Cheap, and correct whenever the edges are not nearly degenerate, but it
-	## can contradict itself for nearly collinear input. Prefer
-	## `crossing_sign` unless the cost has been measured to matter.
-	simple_crossing : S2Point, S2Point, S2Point, S2Point -> Bool
-	simple_crossing = |a, b, c, d| {
-		ab = a.cross(b)
-		acb = -ab.dot(c)
-		bda = ab.dot(d)
-		if acb * bda <= 0.0 {
-			return Bool.False
-		}
-		cd = c.cross(d)
-		cbd = -cd.dot(b)
-		dac = cd.dot(a)
-		acb * cbd > 0.0 and acb * dac > 0.0
 	}
 
 	## The point where two crossing edges meet.
@@ -268,14 +245,14 @@ expect {
 	b = S2Point.new(-1.0, 0.0, 0.1).normalize()
 	c = S2Point.new(0.0, 1.0, 0.1).normalize()
 	d = S2Point.new(0.0, -1.0, 0.1).normalize()
-	S2Edge.simple_crossing(a, b, c, d)
+	simple_crossing(a, b, c, d)
 }
 expect {
 	a = S2Point.new(1.0, 0.0, 0.0)
 	b = S2Point.new(0.0, 1.0, 0.0)
 	c = S2Point.new(0.0, 0.0, 1.0)
 	d = S2Point.new(0.0, 0.0, -1.0)
-	!S2Edge.simple_crossing(a, b, c, d)
+	!simple_crossing(a, b, c, d)
 }
 expect {
 	# The intersection of two crossing edges lies on both of them.
@@ -357,4 +334,27 @@ expect {
 	d = S2Point.new(0.0, 0.0, 1.0)
 	S2Edge.edge_or_vertex_crossing(a, b, c, d)
 		== S2Edge.vertex_crossing(a, b, c, d)
+}
+
+## The error bound on the tangent test in `crossing_sign`.
+tangent_error : F64
+tangent_error = 4.612644198131179e-16
+
+## A crossing test that uses only rounded arithmetic.
+##
+## Cheap, and correct whenever the edges are not nearly degenerate, but it
+## can contradict itself for nearly collinear input. Prefer
+## `crossing_sign` unless the cost has been measured to matter.
+simple_crossing : S2Point, S2Point, S2Point, S2Point -> Bool
+simple_crossing = |a, b, c, d| {
+	ab = a.cross(b)
+	acb = -ab.dot(c)
+	bda = ab.dot(d)
+	if acb * bda <= 0.0 {
+		return Bool.False
+	}
+	cd = c.cross(d)
+	cbd = -cd.dot(b)
+	dac = cd.dot(a)
+	acb * cbd > 0.0 and acb * dac > 0.0
 }

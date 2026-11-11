@@ -235,12 +235,14 @@ S2Point := { x : F64, y : F64, z : F64 }.{
 	##
 	## Uses Girard's formula only for the skinny triangles where l'Huilier's
 	## formula loses accuracy, which keeps the result good to about 1e-15 even
-	## for triangles the size of a leaf cell.
+	## for triangles the size of a leaf cell. The side lengths come from
+	## Kahan's stable angle formula, which stays accurate for nearly equal
+	## points.
 	triangle_area : S2Point, S2Point, S2Point -> F64
 	triangle_area = |a, b, c| {
-		sa = b.angle_to(c).radians()
-		sb = c.angle_to(a).radians()
-		sc = a.angle_to(b).radians()
+		sa = stable_angle(b, c)
+		sb = stable_angle(c, a)
+		sc = stable_angle(a, b)
 		s = 0.5 * (sa + sb + sc)
 		use_girard =
 			if s >= 3e-4 {
@@ -253,7 +255,7 @@ S2Point := { x : F64, y : F64, z : F64 }.{
 		if use_girard {
 			girard = S2Point.girard_area(a, b, c)
 			dmin = s - sa.max(sb).max(sc)
-			if dmin < 2.0 * (0.1 * girard) {
+			if dmin < s * (0.1 * (girard + 5e-15)) {
 				return girard
 			}
 		}
@@ -330,6 +332,15 @@ S2Point := { x : F64, y : F64, z : F64 }.{
 	to_inspect : S2Point -> Str
 	to_inspect = |p| "S2Point(${p.x.to_str()}, ${p.y.to_str()}, ${p.z.to_str()})"
 }
+
+## The angle between two unit-length points by Kahan's formula,
+## `2 * atan2(|a - b|, |a + b|)`.
+##
+## Unlike the cross product, the difference of two nearby points has no
+## cancellation error, so this stays accurate when the points are nearly equal
+## or nearly opposite.
+stable_angle : S2Point, S2Point -> F64
+stable_angle = |a, b| 2.0 * S2Math.atan2((a - b).norm(), (a + b).norm())
 
 expect S2Point.new(1.0, 2.0, 3.0).coord(2) == 3.0
 expect S2Point.new(1.0, 2.0, 3.0).with_coord(1, 9.0) == S2Point.new(1.0, 9.0, 3.0)
@@ -415,4 +426,15 @@ expect {
 	c = S2Point.new(0.0, 0.0, 1.0)
 	centroid = S2Point.true_centroid(a, b, c)
 	centroid.normalize().approx_eq(S2Point.new(1.0, 1.0, 1.0).normalize(), 1e-14)
+}
+expect {
+	# Nearly equal points in general position, where the cross product has
+	# cancellation error. The reference is upstream's formula (stable side
+	# lengths, then l'Huilier's theorem) evaluated in 60-digit arithmetic on
+	# exactly these doubles.
+	a = S2Point.new(0.2672612419124244, 0.5345224838248488, 0.8017837257372732)
+	b = S2Point.new(0.26726150917360897, 0.5345219493022504, 0.8017839929983432)
+	c = S2Point.new(0.2672608410207381, 0.5345224838248012, 0.8017838593677558)
+	expected = 1.3363055413749088e-13
+	(S2Point.triangle_area(a, b, c) - expected).abs() < 1e-12 * expected
 }

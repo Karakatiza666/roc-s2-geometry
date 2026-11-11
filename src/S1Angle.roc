@@ -134,6 +134,8 @@ expect S1Angle.from_degrees(360.0).normalized().radians().abs() < 1e-15
 expect S1Angle.from_degrees(-180.0).normalized() == S1Angle.from_degrees(180.0)
 expect S1Angle.from_degrees(180.0).normalized() == S1Angle.from_degrees(180.0)
 expect S1Angle.from_degrees(270.0).normalized().degrees() == -90.0
+expect S1Angle.from_radians(1e20).normalized().radians() == 1.8955899103166374
+expect S1Angle.from_radians(-1e20).normalized().radians() == -1.8955899103166374
 expect S1Angle.from_degrees(30.0) + S1Angle.from_degrees(60.0) == S1Angle.from_degrees(90.0)
 expect (S1Angle.from_degrees(90.0) - S1Angle.from_degrees(30.0)).approx_eq(S1Angle.from_degrees(60.0), 1e-15)
 expect S1Angle.from_degrees(30.0) * 3.0 == S1Angle.from_degrees(90.0)

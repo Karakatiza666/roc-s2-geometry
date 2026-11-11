@@ -1,14 +1,11 @@
-import R1Interval
 import S1Angle
-import S1Interval
 import S2Cap
 import S2Cell
 import S2Edge
 import S2LatLng
 import S2LatLngRect
-import Internal/S2Math
+import Internal/S2Boundary
 import S2Point
-import S2Predicates
 
 ## A simple closed polygon on the sphere: a sequence of vertices joined by
 ## geodesic edges, with the last vertex joined back to the first.
@@ -18,8 +15,10 @@ import S2Predicates
 ## the sphere encloses less than half of it; `invert` swaps interior for
 ## exterior.
 ##
-## Two one-vertex loops are special: `empty` contains nothing and `full`
-## contains everything. They exist so that the empty and full regions have a
+## A loop with one vertex is special: it is the full loop, containing
+## everything, when that vertex is in the southern hemisphere (`z < 0`), and
+## the empty loop, containing nothing, otherwise. `empty` and `full` give the
+## north and south poles. They exist so that the empty and full regions have a
 ## representation.
 ##
 ## This port has no spatial index, so the cell tests are linear in the vertex
@@ -27,22 +26,14 @@ import S2Predicates
 ## coverer or a containment test usually sees, and slow for very large ones.
 S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect }.{
 
-	## The single vertex that marks the empty loop: the north pole.
-	empty_vertex : () -> S2Point
-	empty_vertex = || S2Point.new(0.0, 0.0, 1.0)
-
-	## The single vertex that marks the full loop: the south pole.
-	full_vertex : () -> S2Point
-	full_vertex = || S2Point.new(0.0, 0.0, -1.0)
-
 	## The loop through the given vertices, in order.
 	from_points : List(S2Point) -> S2Loop
 	from_points = |vertices| {
-		origin_inside = S2Loop.compute_origin_inside(vertices)
+		origin_inside = S2Boundary.compute_origin_inside(vertices)
 		{
 			vertices: vertices,
 			origin_inside: origin_inside,
-			bound: S2Loop.compute_bound(vertices, origin_inside),
+			bound: S2Boundary.compute_bound(vertices, origin_inside),
 		}
 	}
 
@@ -52,11 +43,11 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 
 	## The loop containing nothing.
 	empty : () -> S2Loop
-	empty = || S2Loop.from_points([S2Loop.empty_vertex()])
+	empty = || S2Loop.from_points([S2Boundary.empty_vertex()])
 
 	## The loop containing the whole sphere.
 	full : () -> S2Loop
-	full = || S2Loop.from_points([S2Loop.full_vertex()])
+	full = || S2Loop.from_points([S2Boundary.full_vertex()])
 
 	vertices : S2Loop -> List(S2Point)
 	vertices = |loop| loop.vertices
@@ -82,15 +73,17 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 	cap_bound : S2Loop -> S2Cap
 	cap_bound = |loop| loop.bound.cap_bound()
 
+	## True for a one-vertex loop whose vertex has `z >= 0`.
 	is_empty : S2Loop -> Bool
-	is_empty = |loop| loop.vertices == [S2Loop.empty_vertex()]
+	is_empty = |loop| loop.is_empty_or_full() and !loop.origin_inside
 
+	## True for a one-vertex loop whose vertex has `z < 0`.
 	is_full : S2Loop -> Bool
-	is_full = |loop| loop.vertices == [S2Loop.full_vertex()]
+	is_full = |loop| loop.is_empty_or_full() and loop.origin_inside
 
-	## True for the one-vertex `empty` and `full` sentinels.
+	## True for any one-vertex loop, which is the empty or the full loop.
 	is_empty_or_full : S2Loop -> Bool
-	is_empty_or_full = |loop| loop.is_empty() or loop.is_full()
+	is_empty_or_full = |loop| loop.vertices.len() == 1
 
 	## True when the loop is a well-formed simple polygon.
 	##
@@ -164,28 +157,27 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 		if !loop.bound.contains_point(p) {
 			return Bool.False
 		}
-		S2Loop.crossing_parity(loop.vertices, p, loop.origin_inside)
+		S2Boundary.crossing_parity(loop.vertices, p, loop.origin_inside)
 	}
 
 	## The area of the loop's interior in steradians, in `[0, 4pi]`.
+	##
+	## Follows upstream's `S2Loop::GetArea`. When the area is so close to
+	## zero that rounding could flip its sign, the turning angle decides: a
+	## nearly degenerate loop that runs counterclockwise, and so contains
+	## almost nothing, has an area near 0, and one that runs clockwise, and so
+	## contains almost everything, has an area near `4pi`.
 	area : S2Loop -> F64
 	area = |loop| {
-		if loop.is_empty() {
-			return 0.0
+		if loop.is_empty_or_full() {
+			return if (loop.is_full()) 4.0 * F64.pi else 0.0
 		}
-		if loop.is_full() {
-			return 4.0 * F64.pi
-		}
-		if loop.vertices.len() < 3 {
-			return 0.0
-		}
-		signed = S2Loop.signed_area(loop.vertices)
-		adjusted = if signed < 0.0 {
+		signed = S2Boundary.signed_area(loop.vertices)
+		if signed < 0.0 {
 			signed + 4.0 * F64.pi
 		} else {
 			signed
 		}
-		adjusted.max(0.0).min(4.0 * F64.pi)
 	}
 
 	## The centroid of the loop's interior, scaled by its area so that the
@@ -205,69 +197,52 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 		$sum
 	}
 
-	## The total angle turned while walking the loop once, in radians.
+	## The total angle turned while walking the loop once, in radians: its
+	## geodesic curvature, equal to `2pi` less its area.
 	##
-	## `2pi` for a small counterclockwise loop, `-2pi` for a small clockwise
-	## one, so its sign says which side of the edges the interior is on. This
-	## is the robust way to ask, since it does not go through the area.
+	## Positive for a counterclockwise loop and negative for a clockwise one,
+	## so its sign says which side of the edges the interior is on. This is
+	## the robust way to ask, since it does not go through the area.
+	##
+	## Follows upstream's `S2Loop::GetCurvature`. The empty loop gives `2pi`
+	## and the full loop `-2pi`. Repeated vertices and spikes are pruned
+	## first, and a loop that is nothing else gives exactly `2pi`. Any other
+	## loop gives a value in `(-2pi, 2pi)`. The turn angles are summed in an
+	## order fixed by the vertices themselves, so rotating the loop does not
+	## change the result and reversing it negates the result exactly.
 	turning_angle : S2Loop -> F64
 	turning_angle = |loop| {
-		if loop.is_empty() {
-			return 2.0 * F64.pi
+		if loop.is_empty_or_full() {
+			return if (loop.is_full()) -2.0 * F64.pi else 2.0 * F64.pi
 		}
-		if loop.is_full() {
-			return -2.0 * F64.pi
-		}
-		if loop.vertices.len() < 3 {
-			return 0.0
-		}
-		n = loop.vertices.len()
-		var $sum = 0.0
-		var $i = 0
-		while $i < n {
-			$sum = $sum
-				+ S2Loop.turn_angle(loop.vertex($i), loop.vertex($i + 1), loop.vertex($i + 2))
-			$i = $i + 1
-		}
-		$sum
-	}
-
-	## The angle turned at vertex `b` when walking from `a` to `c`, positive
-	## for a left turn.
-	turn_angle : S2Point, S2Point, S2Point -> F64
-	turn_angle = |a, b, c| {
-		outgoing = b.robust_cross(c)
-		incoming = a.robust_cross(b)
-		angle = outgoing.angle_to(incoming).radians()
-		if S2Predicates.sign(a, b, c) > 0 {
-			angle
-		} else {
-			-angle
-		}
+		S2Boundary.curvature(loop.vertices)
 	}
 
 	## True when the loop encloses at most half the sphere, which is the
 	## orientation S2 treats as canonical.
+	##
+	## A loop whose longitude span is less than pi is normalized. Otherwise
+	## the turning angle must be at least the negated error bound of the
+	## turning angle, which grows with the vertex count, so that a hemisphere
+	## always counts as normalized. This is upstream's `IsNormalized`.
 	is_normalized : S2Loop -> Bool
-	is_normalized = |loop| loop.turning_angle() >= -1e-14
+	is_normalized = |loop| {
+		if loop.bound.lng().length() < F64.pi {
+			return Bool.True
+		}
+		loop.turning_angle() >= -S2Boundary.curvature_max_error(loop.vertices)
+	}
 
 	## The loop with the same boundary but the opposite interior.
 	##
-	## Reverses the vertex order, keeping the first vertex first, which is
-	## what upstream's `Invert` does.
+	## Reverses the whole vertex list, so `ABCD` becomes `DCBA`, as upstream's
+	## `Invert` does. The empty and full loops swap.
 	invert : S2Loop -> S2Loop
 	invert = |loop| {
-		if loop.is_empty() {
-			return S2Loop.full()
+		if loop.is_empty_or_full() {
+			return if (loop.is_full()) S2Loop.empty() else S2Loop.full()
 		}
-		if loop.is_full() {
-			return S2Loop.empty()
-		}
-		if loop.vertices.is_empty() {
-			return loop
-		}
-		first = loop.vertex(0)
-		S2Loop.from_points([first].concat(loop.vertices.drop_first(1).rev()))
+		S2Loop.from_points(loop.vertices.rev())
 	}
 
 	## The loop in canonical orientation, inverted if it was enclosing more
@@ -331,7 +306,7 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 		if !loop.bound.intersects_rect(other.bound) {
 			return Bool.False
 		}
-		rel = S2Loop.relate(loop, other, Bool.False)
+		rel = S2Boundary.relate(loop.vertices, other.vertices, Bool.False)
 		if rel.crossing or !rel.wedges_contained {
 			return Bool.False
 		}
@@ -356,7 +331,7 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 		if !loop.bound.intersects_rect(other.bound) {
 			return Bool.False
 		}
-		rel = S2Loop.relate(loop, other, Bool.False)
+		rel = S2Boundary.relate(loop.vertices, other.vertices, Bool.False)
 		if rel.crossing or rel.wedges_overlap {
 			return Bool.True
 		}
@@ -379,9 +354,9 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 		if !loop.bound.intersects_rect(other.bound) {
 			return Bool.False
 		}
-		match S2Loop.find_vertex(loop, other.vertex(1)) {
+		match S2Boundary.find_vertex(loop.vertices, other.vertex(1)) {
 			Err(NotFound) => loop.contains_point(other.vertex(1))
-			Ok(m) => S2Loop.wedge_contains(
+			Ok(m) => S2Boundary.wedge_contains(
 				loop.vertex(m + loop.num_vertices() - 1),
 				loop.vertex(m),
 				loop.vertex(m + 1),
@@ -416,7 +391,7 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 		if other.is_full() {
 			return -1
 		}
-		rel = S2Loop.relate(loop, other, other_is_hole)
+		rel = S2Boundary.relate(loop.vertices, other.vertices, other_is_hole)
 		if rel.crossing or (rel.semi_contained and rel.semi_excluded) {
 			return 0
 		}
@@ -453,9 +428,9 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 		if other.is_full() {
 			return Bool.False
 		}
-		match S2Loop.find_vertex(loop, other.vertex(0)) {
+		match S2Boundary.find_vertex(loop.vertices, other.vertex(0)) {
 			Err(NotFound) => loop.contains_point(other.vertex(0))
-			Ok(m) => S2Loop.wedge_contains_semiwedge(
+			Ok(m) => S2Boundary.wedge_contains_semiwedge(
 				loop.vertex(m + loop.num_vertices() - 1),
 				loop.vertex(m),
 				loop.vertex(m + 1),
@@ -468,354 +443,39 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 	## True when the loop contains every point of the cell.
 	##
 	## The cell is inside when its centre is inside, no loop edge crosses its
-	## boundary, and no loop vertex falls within it.
+	## boundary, and no loop vertex falls within it. The full loop contains
+	## every cell. Its one vertex is a marker, not a point of a boundary.
 	contains_cell : S2Loop, S2Cell -> Bool
 	contains_cell = |loop, cell| {
+		if loop.is_empty_or_full() {
+			return loop.is_full()
+		}
 		if !loop.contains_point(cell.center()) {
 			return Bool.False
 		}
-		if S2Loop.crosses_cell_boundary(loop, cell) {
+		if S2Boundary.crosses_cell_boundary(loop.vertices, cell) {
 			return Bool.False
 		}
 		# No crossing means the loop lies wholly inside or wholly outside the
 		# cell. A vertex inside puts it wholly inside, so the cell sticks out.
-		var $vertex_inside = Bool.False
-		for v in loop.vertices {
-			if cell.contains_point(v) {
-				$vertex_inside = Bool.True
-			}
-		}
-		!$vertex_inside
+		!S2Boundary.cell_contains_any(cell, loop.vertices)
 	}
 
 	## True when the loop and the cell share any point.
+	##
+	## The empty loop meets no cell and the full loop meets every cell.
 	may_intersect_cell : S2Loop, S2Cell -> Bool
 	may_intersect_cell = |loop, cell| {
+		if loop.is_empty_or_full() {
+			return loop.is_full()
+		}
 		if loop.contains_point(cell.center()) {
 			return Bool.True
 		}
-		var $hit = Bool.False
-		for v in loop.vertices {
-			if cell.contains_point(v) {
-				$hit = Bool.True
-			}
-		}
-		if $hit {
+		if S2Boundary.cell_contains_any(cell, loop.vertices) {
 			return Bool.True
 		}
-		S2Loop.crosses_cell_boundary(loop, cell)
-	}
-
-	## True when any loop edge meets any of the cell's four edges.
-	crosses_cell_boundary : S2Loop, S2Cell -> Bool
-	crosses_cell_boundary = |loop, cell| {
-		n = loop.vertices.len()
-		if n < 2 {
-			return Bool.False
-		}
-		var $hit = Bool.False
-		var $i = 0
-		while $i < n {
-			a = loop.vertex($i)
-			b = loop.vertex($i + 1)
-			var $k = 0
-			while $k < 4 {
-				if S2Edge.crossing_sign(a, b, cell.vertex($k), cell.vertex(($k + 1) % 4)) >= 0 {
-					$hit = Bool.True
-				}
-				$k = $k + 1
-			}
-			$i = $i + 1
-		}
-		$hit
-	}
-
-	## What one pass over every pair of edges found.
-	##
-	## The five answers cost one scan between them, so `contains`,
-	## `intersects` and `compare_boundary` each ask for all five and read the
-	## ones they need.
-	Relation : {
-		crossing : Bool,
-		shared : Bool,
-		wedges_contained : Bool,
-		wedges_overlap : Bool,
-		semi_contained : Bool,
-		semi_excluded : Bool,
-	}
-
-	## Compare every edge of one loop against every edge of the other.
-	##
-	## A proper crossing is decisive on its own. Where the loops merely touch,
-	## what matters is the order of the four edges around the shared vertex,
-	## which is what the three wedge tests read.
-	relate : S2Loop, S2Loop, Bool -> Relation
-	relate = |loop, other, reverse_other| {
-		n = loop.num_vertices()
-		m = other.num_vertices()
-		var $crossing = Bool.False
-		var $shared = Bool.False
-		var $wedges_contained = Bool.True
-		var $wedges_overlap = Bool.False
-		var $semi_contained = Bool.False
-		var $semi_excluded = Bool.False
-		var $i = 0
-		while $i < n {
-			a0 = loop.vertex($i)
-			a1 = loop.vertex($i + 1)
-			var $j = 0
-			while $j < m {
-				b0 = other.vertex($j)
-				b1 = other.vertex($j + 1)
-				sign = S2Edge.crossing_sign(a0, a1, b0, b1)
-				if sign > 0 {
-					$crossing = Bool.True
-				} else if sign == 0 and a0 == b0 {
-					# Every shared vertex is reached once this way: at the one
-					# pair of edges that both start there.
-					$shared = Bool.True
-					a_prev = loop.vertex($i + n - 1)
-					b_prev = other.vertex($j + m - 1)
-					if !S2Loop.wedge_contains(a_prev, a0, a1, b_prev, b1) {
-						$wedges_contained = Bool.False
-					}
-					if S2Loop.wedge_intersects(a_prev, a0, a1, b_prev, b1) {
-						$wedges_overlap = Bool.True
-					}
-					if S2Loop.wedge_contains_semiwedge(a_prev, a0, a1, b1, reverse_other) {
-						$semi_contained = Bool.True
-					} else {
-						$semi_excluded = Bool.True
-					}
-				}
-				$j = $j + 1
-			}
-			$i = $i + 1
-		}
-		{
-			crossing: $crossing,
-			shared: $shared,
-			wedges_contained: $wedges_contained,
-			wedges_overlap: $wedges_overlap,
-			semi_contained: $semi_contained,
-			semi_excluded: $semi_excluded,
-		}
-	}
-
-	## True when the wedge `a0 -> ab1 -> a2` contains the wedge
-	## `b0 -> ab1 -> b2`, each wedge's inside being on its left.
-	##
-	## Containment means the edges run `a2 b2 b0 a0` counterclockwise around
-	## the shared vertex, split here into two three-point tests.
-	wedge_contains : S2Point, S2Point, S2Point, S2Point, S2Point -> Bool
-	wedge_contains = |a0, ab1, a2, b0, b2|
-		S2Predicates.ordered_ccw(a2, b2, b0, ab1)
-			and S2Predicates.ordered_ccw(b0, a0, a2, ab1)
-
-	## True when the two wedges at `ab1` share interior rays.
-	##
-	## Written as the negation of "disjoint" on purpose: the positive form is
-	## the one that gets the degenerate cases wrong.
-	wedge_intersects : S2Point, S2Point, S2Point, S2Point, S2Point -> Bool
-	wedge_intersects = |a0, ab1, a2, b0, b2|
-		!(S2Predicates.ordered_ccw(a0, b2, b0, ab1)
-			and S2Predicates.ordered_ccw(b0, a2, a0, ab1))
-
-	## True when the wedge `a0 -> ab1 -> a2` contains the rays just
-	## counterclockwise of the edge `ab1 -> b2`, or just clockwise of it when
-	## `reverse_b` is set.
-	##
-	## This is the test for containing a boundary rather than a region, so a
-	## shared edge counts as contained exactly when the two loops disagree
-	## about which side is inside.
-	wedge_contains_semiwedge : S2Point, S2Point, S2Point, S2Point, Bool -> Bool
-	wedge_contains_semiwedge = |a0, ab1, a2, b2, reverse_b|
-		if b2 == a0 or b2 == a2 {
-			(b2 == a0) == reverse_b
-		} else {
-			S2Predicates.ordered_ccw(a0, a2, b2, ab1)
-		}
-
-	## The index of the loop's first vertex equal to `p`, if it has one.
-	find_vertex : S2Loop, S2Point -> Try(U64, [NotFound])
-	find_vertex = |loop, p| {
-		var $found = Bool.False
-		var $index = 0
-		var $i = 0
-		while $i < loop.num_vertices() {
-			if !$found and loop.vertex($i) == p {
-				$found = Bool.True
-				$index = $i
-			}
-			$i = $i + 1
-		}
-		if $found {
-			Ok($index)
-		} else {
-			Err(NotFound)
-		}
-	}
-
-	## Whether the reference point lies inside the loop, which anchors every
-	## later containment test.
-	##
-	## Found by answering "is vertex 1 inside?" twice: once from the wedge of
-	## the two edges meeting there, which is always right, and once by
-	## counting crossings while assuming the reference point is outside.
-	## Disagreement means the assumption was wrong.
-	compute_origin_inside : List(S2Point) -> Bool
-	compute_origin_inside = |points| {
-		n = points.len()
-		if n < 3 {
-			# Only the empty and full sentinels are meaningful here, and only
-			# the full loop can contain the reference point.
-			if n == 1 and (points.get(0) ?? S2Point.zero()) == S2Loop.full_vertex() {
-				Bool.True
-			} else {
-				Bool.False
-			}
-		} else {
-			v0 = points.get(0) ?? S2Point.zero()
-			v1 = points.get(1) ?? S2Point.zero()
-			v2 = points.get(2) ?? S2Point.zero()
-			v1_inside =
-				v0 != v1 and v2 != v1 and S2Predicates.angle_contains_vertex(v0, v1, v2)
-			v1_inside != S2Loop.crossing_parity(points, v1, Bool.False)
-		}
-	}
-
-	## Counts boundary crossings between the reference point and `p`.
-	crossing_parity : List(S2Point), S2Point, Bool -> Bool
-	crossing_parity = |points, p, origin_inside| {
-		n = points.len()
-		origin = S2Point.origin()
-		var $inside = origin_inside
-		var $i = 0
-		while $i < n {
-			a = points.get($i) ?? S2Point.zero()
-			b = points.get(($i + 1) % n) ?? S2Point.zero()
-			if S2Edge.edge_or_vertex_crossing(origin, p, a, b) {
-				$inside = !$inside
-			}
-			$i = $i + 1
-		}
-		$inside
-	}
-
-	## The signed area swept by triangles from the first vertex, which is the
-	## loop's area modulo `4pi`.
-	signed_area : List(S2Point) -> F64
-	signed_area = |points| {
-		origin = points.get(0) ?? S2Point.zero()
-		var $sum = 0.0
-		var $i = 1
-		while $i + 1 < points.len() {
-			a = points.get($i) ?? S2Point.zero()
-			b = points.get($i + 1) ?? S2Point.zero()
-			$sum = $sum
-				+ S2Point.triangle_area(origin, a, b) * S2Predicates.sign(origin, a, b).to_f64()
-			$i = $i + 1
-		}
-		$sum
-	}
-
-	## The bounding rectangle of the loop's edges, not just its vertices.
-	##
-	## A geodesic edge bulges polewards of its endpoints, so each edge's own
-	## maximum latitude is included when it falls inside that edge. A loop
-	## containing a pole gets the full range of longitudes.
-	compute_bound : List(S2Point), Bool -> S2LatLngRect
-	compute_bound = |points, origin_inside| {
-		n = points.len()
-		if n == 0 {
-			return S2LatLngRect.empty()
-		}
-		if n == 1 {
-			return if (points.get(0) ?? S2Point.zero()) == S2Loop.full_vertex() {
-				S2LatLngRect.full()
-			} else {
-				S2LatLngRect.empty()
-			}
-		}
-
-		var $bound = S2LatLngRect.empty()
-		var $i = 0
-		while $i < n {
-			a = points.get($i) ?? S2Point.zero()
-			b = points.get(($i + 1) % n) ?? S2Point.zero()
-			$bound = $bound.union(S2Loop.edge_bound(a, b))
-			$i = $i + 1
-		}
-
-		# Rounding in the trigonometry above can shave the true bound.
-		padded = $bound.expanded(S1Angle.from_radians(2.0e-15) |> S2Loop.uniform_margin)
-		north = S2Loop.contains_pole(points, origin_inside, Bool.True)
-		south = S2Loop.contains_pole(points, origin_inside, Bool.False)
-		# A loop that reaches a pole covers every longitude there, and one
-		# that reaches both covers every latitude between them as well.
-		if north and south {
-			S2LatLngRect.full()
-		} else if north {
-			S2LatLngRect.new(
-				R1Interval.new(padded.lat().lo(), 0.5 * F64.pi),
-				S1Interval.full(),
-			)
-		} else if south {
-			S2LatLngRect.new(
-				R1Interval.new(-0.5 * F64.pi, padded.lat().hi()),
-				S1Interval.full(),
-			)
-		} else {
-			padded
-		}
-	}
-
-	## The same margin in latitude and longitude.
-	uniform_margin : S1Angle -> S2LatLng
-	uniform_margin = |angle| S2LatLng.from_radians(angle.radians(), angle.radians())
-
-	## True when the loop contains the north or the south pole.
-	contains_pole : List(S2Point), Bool, Bool -> Bool
-	contains_pole = |points, origin_inside, north|
-		S2Loop.crossing_parity(
-			points,
-			if north {
-				S2Point.new(0.0, 0.0, 1.0)
-			} else {
-				S2Point.new(0.0, 0.0, -1.0)
-			},
-			origin_inside,
-		)
-
-	## The bounding rectangle of a single geodesic edge.
-	edge_bound : S2Point, S2Point -> S2LatLngRect
-	edge_bound = |a, b| {
-		a_ll = S2LatLng.from_point(a)
-		b_ll = S2LatLng.from_point(b)
-		var $lat = R1Interval.from_point_pair(a_ll.lat_radians(), b_ll.lat_radians())
-		lng = S1Interval.from_point_pair(a_ll.lng_radians(), b_ll.lng_radians())
-
-		# The extreme latitudes of the edge's great circle are where the
-		# +z direction projects into the circle's plane.
-		n = a.robust_cross(b).normalize()
-		horizontal = S2Point.new(-n.z() * n.x(), -n.z() * n.y(), 1.0 - n.z() * n.z())
-		if horizontal.norm2() > 0.0 {
-			peak = horizontal.normalize()
-			for candidate in [peak, -peak] {
-				if S2Loop.on_edge(a, b, candidate) {
-					$lat = $lat.add_point(S2LatLng.latitude(candidate).radians())
-				}
-			}
-		}
-		S2LatLngRect.new($lat, lng)
-	}
-
-	## True when `c`, already on the edge's great circle, lies within the arc
-	## from `a` to `b`.
-	on_edge : S2Point, S2Point, S2Point -> Bool
-	on_edge = |a, b, c| {
-		n = a.cross(b)
-		a.cross(c).dot(n) >= 0.0 and c.cross(b).dot(n) >= 0.0
+		S2Boundary.crosses_cell_boundary(loop.vertices, cell)
 	}
 
 	## True when the two loops have the same vertices to within `max_error`
@@ -1018,6 +678,15 @@ expect {
 }
 
 expect {
+	# The sentinels' one vertex is not a boundary point. The full loop's
+	# vertex is the south pole, on face 5, and the empty loop's is the north
+	# pole, on face 2.
+	faces = [0, 1, 2, 3, 4, 5].map(S2Cell.from_face)
+	faces.all(|cell| S2Loop.full().contains_cell(cell) and S2Loop.full().may_intersect_cell(cell))
+		and faces.all(|cell| !S2Loop.empty().contains_cell(cell) and !S2Loop.empty().may_intersect_cell(cell))
+}
+
+expect {
 	# A square, and a smaller one strictly inside it.
 	outer = S2Loop.from_lat_lngs([
 		S2LatLng.from_degrees(-2.0, -2.0),
@@ -1100,4 +769,98 @@ expect {
 		S2LatLng.from_degrees(0.0, 0.0),
 	])
 	a.boundary_equals(b) and a.contains(b) and b.contains(a) and !a.is_eq(b)
+}
+
+expect {
+	# Upstream's GetAreaConsistentWithSign: points on the equator within 90
+	# degrees of longitude make a degenerate loop. Which way it runs decides
+	# whether it contains almost nothing or almost everything, and the area
+	# must agree: near 0 when normalized, near 4pi when not, with the north
+	# pole inside only in the second case.
+	agrees = |loop| {
+		ccw = loop.is_normalized()
+		expected = if (ccw) 0.0 else 4.0 * F64.pi
+		(loop.area() - expected).abs() <= 1e-15
+			and loop.contains_point(S2Point.new(0.0, 0.0, 1.0)) == !ccw
+	}
+	loop = S2Loop.from_lat_lngs([
+		S2LatLng.from_degrees(0.0, 10.0),
+		S2LatLng.from_degrees(0.0, 20.0),
+		S2LatLng.from_degrees(0.0, 30.0),
+	])
+	loop.is_valid() and agrees(loop) and agrees(loop.invert())
+}
+expect {
+	# Upstream's CheckCurvatureInvariants: rotating the vertices leaves the
+	# turning angle exactly the same, and reversing them negates it exactly.
+	points = [
+		S2LatLng.from_degrees(0.3, 0.1),
+		S2LatLng.from_degrees(-1.7, 2.9),
+		S2LatLng.from_degrees(0.9, 5.3),
+		S2LatLng.from_degrees(3.1, 4.7),
+		S2LatLng.from_degrees(2.2, 2.3),
+		S2LatLng.from_degrees(4.9, 0.7),
+		S2LatLng.from_degrees(1.3, -1.1),
+	].map(S2LatLng.to_point)
+	expected = S2Loop.from_points(points).turning_angle()
+	n = points.len()
+	var $ok = Bool.True
+	var $i = 0
+	while $i < n {
+		rotated = S2Loop.from_points(points.drop_first($i).concat(points.take_first($i)))
+		if rotated.turning_angle() != expected or rotated.invert().turning_angle() != -expected {
+			$ok = Bool.False
+		}
+		$i = $i + 1
+	}
+	$ok
+}
+expect {
+	# A loop made only of degeneracies has a turning angle of exactly 2pi:
+	# upstream's PruneDegeneracies reduces "abcb" to nothing.
+	a = S2LatLng.from_degrees(0.0, 0.0).to_point()
+	b = S2LatLng.from_degrees(1.0, 0.0).to_point()
+	c = S2LatLng.from_degrees(1.0, 1.0).to_point()
+	S2Loop.from_points([a, b, c, b]).turning_angle() == 2.0 * F64.pi
+}
+expect {
+	# Upstream's IsNormalized allows an error that grows with the vertex
+	# count, about 2.5e-12 for 1000 vertices. Moving one vertex of a
+	# 1000-vertex equator loop 1e-11 radians south adds about
+	# 0.5 * (2 * 0.36 degrees) * 1e-11 = 6.3e-14 to the area of the northern
+	# hemisphere, so the turning angle is about -6.3e-14: outside a fixed
+	# bound of 1e-14, inside upstream's.
+	var $points = [S2LatLng.from_radians(-1e-11, -F64.pi).to_point()]
+	var $i = 1
+	while $i < 1000 {
+		$points = $points.append(S2LatLng.from_degrees(0.0, -180.0 + 0.36 * $i.to_f64()).to_point())
+		$i = $i + 1
+	}
+	loop = S2Loop.from_points($points)
+	angle = loop.turning_angle()
+	angle < -5e-14 and angle > -8e-14 and loop.is_normalized() and loop.invert().is_normalized()
+}
+expect {
+	# Upstream treats any one-vertex loop as empty or full: full when the
+	# vertex is in the southern hemisphere, empty otherwise.
+	south = S2Loop.from_points([S2LatLng.from_degrees(-30.0, 40.0).to_point()])
+	north = S2Loop.from_points([S2LatLng.from_degrees(30.0, 40.0).to_point()])
+	p = S2LatLng.from_degrees(10.0, 10.0).to_point()
+	south.is_full()
+		and south.is_valid()
+		and south.contains_point(p)
+		and south.area() == 4.0 * F64.pi
+		and south.turning_angle() == -2.0 * F64.pi
+		and north.is_empty()
+		and !north.contains_point(p)
+		and north.area() == 0.0
+		and south.invert().is_empty()
+		and north.invert().is_full()
+}
+expect {
+	# Upstream's Invert reverses the whole vertex list: ABC becomes CBA.
+	a = S2Point.new(1.0, 0.0, 0.0)
+	b = S2Point.new(0.0, 1.0, 0.0)
+	c = S2Point.new(0.0, 0.0, 1.0)
+	S2Loop.from_points([a, b, c]).invert().vertices() == [c, b, a]
 }

@@ -16,10 +16,15 @@ import S2Point
 S2CellUnion := { ids : List(S2CellId) }.{
 
 	## The union of the given cells, normalized.
+	##
+	## Ids that are not valid cells are dropped. Upstream requires valid ids.
 	from_cell_ids : List(S2CellId) -> S2CellUnion
-	from_cell_ids = |ids| { ids: S2CellUnion.normalize_sorted(S2CellUnion.sorted(ids)) }
+	from_cell_ids = |ids| {
+		ids: normalize_sorted(sorted(ids.keep_if(S2CellId.is_valid))),
+	}
 
 	## The union of the cells with the given 64-bit encodings, normalized.
+	## Ids that are not valid cells are dropped.
 	from_ids : List(U64) -> S2CellUnion
 	from_ids = |ids| S2CellUnion.from_cell_ids(ids.map(S2CellId.from_id))
 
@@ -58,86 +63,43 @@ S2CellUnion := { ids : List(S2CellId) }.{
 	is_empty : S2CellUnion -> Bool
 	is_empty = |u| u.ids.is_empty()
 
-	## The cells sorted by id.
-	sorted : List(S2CellId) -> List(S2CellId)
-	sorted = |ids| ids.map(S2CellId.id).sort().map(S2CellId.from_id)
+	## True when every cell is valid and the cells are sorted and do not
+	## overlap.
+	is_valid : S2CellUnion -> Bool
+	is_valid = |u| ids_in_order(u.ids)
 
-	## Collapses a sorted list into normal form.
-	##
-	## Drops cells contained in an earlier one, and folds any four siblings
-	## into their parent, repeatedly, so that the same region always has the
-	## same representation.
-	normalize_sorted : List(S2CellId) -> List(S2CellId)
-	normalize_sorted = |ids| {
-		var $out = []
-		for cell_id in ids {
-			var $current = cell_id
-			var $skip = Bool.False
-
-			# Already covered by the cell before it.
-			if !$out.is_empty() {
-				last = $out.get($out.len() - 1) ?? $current
-				if last.contains($current) {
-					$skip = Bool.True
+	## True when the union is valid and also has no four siblings that a
+	## parent could replace.
+	is_normalized : S2CellUnion -> Bool
+	is_normalized = |u| {
+		if !ids_in_order(u.ids) {
+			return Bool.False
+		}
+		var $ok = Bool.True
+		for index in (3.U64).until(u.ids.len()) {
+			a = (u.ids.get(index - 3) ?? S2CellId.none()).id()
+			b = (u.ids.get(index - 2) ?? S2CellId.none()).id()
+			c = (u.ids.get(index - 1) ?? S2CellId.none()).id()
+			d = u.ids.get(index) ?? S2CellId.none()
+			if a.bitwise_xor(b).bitwise_xor(c) == d.id() {
+				step = d.lsb().shl_wrap(1)
+				mask = step.plus_wrap(step.shl_wrap(1)).bitwise_not()
+				wanted = d.id().bitwise_and(mask)
+				if a.bitwise_and(mask) == wanted
+					and b.bitwise_and(mask) == wanted
+					and c.bitwise_and(mask) == wanted
+					and !d.is_face() {
+					$ok = Bool.False
 				}
-			}
-
-			if !$skip {
-				# This cell swallows the ones before it.
-				while !$out.is_empty() and $current.contains($out.get($out.len() - 1) ?? $current) {
-					$out = $out.drop_last(1)
-				}
-
-				# Four siblings collapse into their parent, which may then
-				# complete another set of four.
-				var $merging = Bool.True
-				while $merging and $out.len() >= 3 {
-					a = ($out.get($out.len() - 3) ?? $current).id()
-					b = ($out.get($out.len() - 2) ?? $current).id()
-					c = ($out.get($out.len() - 1) ?? $current).id()
-					if a.bitwise_xor(b).bitwise_xor(c) != $current.id() {
-						$merging = Bool.False
-					} else {
-						step = $current.lsb().shl_wrap(1)
-						mask = step.plus_wrap(step.shl_wrap(1)).bitwise_not()
-						wanted = $current.id().bitwise_and(mask)
-						if a.bitwise_and(mask) != wanted
-							or b.bitwise_and(mask) != wanted
-							or c.bitwise_and(mask) != wanted
-							or $current.is_face() {
-							$merging = Bool.False
-						} else {
-							$out = $out.drop_last(3)
-							$current = $current.parent()
-						}
-					}
-				}
-				$out = $out.append($current)
 			}
 		}
-		$out
-	}
-
-	## The index of the first cell not less than `target`.
-	lower_bound : S2CellUnion, S2CellId -> U64
-	lower_bound = |u, target| {
-		var $low = 0
-		var $high = u.ids.len()
-		while $low < $high {
-			mid = $low + ($high - $low) / 2
-			if (u.ids.get(mid) ?? S2CellId.sentinel()).id() < target.id() {
-				$low = mid + 1
-			} else {
-				$high = mid
-			}
-		}
-		$low
+		$ok
 	}
 
 	## True when the union covers the whole of the given cell.
 	contains_cell_id : S2CellUnion, S2CellId -> Bool
 	contains_cell_id = |u, cell_id| {
-		index = u.lower_bound(cell_id)
+		index = lower_bound(u, cell_id)
 		if index < u.ids.len() and (u.ids.get(index) ?? S2CellId.sentinel()).range_min() <= cell_id {
 			return Bool.True
 		}
@@ -147,7 +109,7 @@ S2CellUnion := { ids : List(S2CellId) }.{
 	## True when the union covers any part of the given cell.
 	intersects_cell_id : S2CellUnion, S2CellId -> Bool
 	intersects_cell_id = |u, cell_id| {
-		index = u.lower_bound(cell_id)
+		index = lower_bound(u, cell_id)
 		if index < u.ids.len()
 			and (u.ids.get(index) ?? S2CellId.sentinel()).range_min() <= cell_id.range_max() {
 			return Bool.True
@@ -211,7 +173,7 @@ S2CellUnion := { ids : List(S2CellId) }.{
 				$i = $i + 1
 			}
 		}
-		{ ids: S2CellUnion.normalize_sorted($out) }
+		{ ids: normalize_sorted($out) }
 	}
 
 	## Every point of this union that also lies in the given cell.
@@ -224,28 +186,9 @@ S2CellUnion := { ids : List(S2CellId) }.{
 	difference = |u, other| {
 		var $out = []
 		for cell_id in u.ids {
-			$out = $out.concat(S2CellUnion.difference_of_cell(cell_id, other))
+			$out = $out.concat(difference_of_cell(cell_id, other))
 		}
-		{ ids: S2CellUnion.normalize_sorted($out) }
-	}
-
-	## The part of one cell that `other` does not cover, refining the cell
-	## only where the two actually overlap.
-	difference_of_cell : S2CellId, S2CellUnion -> List(S2CellId)
-	difference_of_cell = |cell_id, other| {
-		if !other.intersects_cell_id(cell_id) {
-			[cell_id]
-		} else if other.contains_cell_id(cell_id) {
-			[]
-		} else if cell_id.is_leaf() {
-			[]
-		} else {
-			var $out = []
-			for child in cell_id.children() {
-				$out = $out.concat(S2CellUnion.difference_of_cell(child, other))
-			}
-			$out
-		}
+		{ ids: normalize_sorted($out) }
 	}
 
 	## The union grown to include every cell at `level` that touches it.
@@ -283,12 +226,14 @@ S2CellUnion := { ids : List(S2CellId) }.{
 			$min_level = $min_level.min(cell_id.level())
 		}
 		radius_level = S2Metric.min_width.max_level_for(min_radius.radians())
-		if radius_level == 0 and min_radius.radians() > S2Metric.min_width.value_at(0) {
-			# Wider than a face cell, so nothing finer than level 0 will do.
+		# A radius wider than a face cell needs two passes: one at level 0, then
+		# the normal one. The second pass uses the level found before the first.
+		first = if radius_level == 0 and min_radius.radians() > S2Metric.min_width.value_at(0) {
 			u.expand_at_level(0)
 		} else {
-			u.expand_at_level(($min_level + max_level_diff).min(radius_level))
+			u
 		}
+		first.expand_at_level(($min_level + max_level_diff).min(radius_level))
 	}
 
 	## The same region as a list of cells no coarser than `min_level`, whose
@@ -347,11 +292,13 @@ S2CellUnion := { ids : List(S2CellId) }.{
 		if u.ids.is_empty() {
 			return S2Cap.empty()
 		}
-		# Centre the cap on the centroid of the cell centres, then grow it to
+		# Centre the cap on the centroid of the cell centres, each weighted by
+		# the average area of its level, then grow it to
 		# cover every cell's own bounding cap.
 		var $centroid = S2Point.zero()
 		for cell_id in u.ids {
-			$centroid = $centroid + cell_id.to_point()
+			area = S2Metric.avg_area.value_at(cell_id.level())
+			$centroid = $centroid + cell_id.to_point().times(area)
 		}
 		axis = if $centroid == S2Point.zero() {
 			S2Point.new(1.0, 0.0, 0.0)
@@ -477,6 +424,15 @@ expect {
 	expanded.contains_cell_id(cell_id)
 }
 expect {
+	# A radius wider than a face cell expands at level 0 and then once more, so
+	# one level 10 cell reaches past its face's neighbors.
+	cell_id = S2CellId.from_face(0).child_begin_at_level(10)
+	u = S2CellUnion.from_cell_ids([cell_id])
+	expanded = u.expand_by_radius(S1Angle.from_degrees(80.0), 2)
+	expected = u.expand_at_level(0).expand_at_level(0)
+	expanded == expected and expanded.num_cells() > u.expand_at_level(0).num_cells()
+}
+expect {
 	# Denormalizing to a finer level replaces each cell with its descendants.
 	u = S2CellUnion.from_cell_ids([S2CellId.from_face(0)])
 	u.denormalize(2, 1).len() == 16
@@ -504,4 +460,132 @@ expect S2CellUnion.empty().rect_bound().is_empty()
 expect {
 	u = S2CellUnion.from_ids([S2CellId.from_face(0).id()])
 	u.contains_cell(S2Cell.from_face(0)) and u.may_intersect_cell(S2Cell.from_face(0))
+}
+expect S2CellUnion.from_ids([0]).is_empty()
+expect S2CellUnion.from_ids([0, S2CellId.from_face(2).id(), 2]).cell_ids() == [S2CellId.from_face(2)]
+expect S2CellUnion.from_ids([0]).is_valid() and S2CellUnion.from_ids([0]).is_normalized()
+expect S2CellUnion.whole_sphere().is_normalized()
+expect !S2CellUnion.from_normalized_cell_ids([S2CellId.none()]).is_valid()
+expect {
+	c = S2CellId.from_face(0).child(1)
+	# Overlapping cells are not valid, and four siblings are not normalized.
+	!S2CellUnion.from_normalized_cell_ids([c, c.child(0)]).is_valid()
+		and S2CellUnion.from_normalized_cell_ids(c.children()).is_valid()
+		and !S2CellUnion.from_normalized_cell_ids(c.children()).is_normalized()
+}
+expect {
+	# The big cell outweighs the small one, so the cap axis stays near its centre.
+	big = S2CellId.from_face(0)
+	small = S2CellId.from_point(S2Point.new(0.0, 1.0, 0.0))
+	axis = S2CellUnion.from_cell_ids([big, small]).cap_bound().center()
+	axis.dot(S2Point.new(1.0, 0.0, 0.0)) > 0.99999
+}
+
+## True when every id is valid and each range ends before the next begins.
+ids_in_order : List(S2CellId) -> Bool
+ids_in_order = |ids| {
+	var $ok = ids.first().map_ok(S2CellId.is_valid).ok_or(Bool.True)
+	for index in (1.U64).until(ids.len()) {
+		prev = ids.get(index - 1) ?? S2CellId.none()
+		cur = ids.get(index) ?? S2CellId.none()
+		if !cur.is_valid() or prev.range_max().id() >= cur.range_min().id() {
+			$ok = Bool.False
+		}
+	}
+	$ok
+}
+
+## The cells sorted by id.
+sorted : List(S2CellId) -> List(S2CellId)
+sorted = |ids| ids.map(S2CellId.id).sort().map(S2CellId.from_id)
+
+## Collapses a sorted list into normal form.
+##
+## Drops cells contained in an earlier one, and folds any four siblings
+## into their parent, repeatedly, so that the same region always has the
+## same representation.
+normalize_sorted : List(S2CellId) -> List(S2CellId)
+normalize_sorted = |ids| {
+	var $out = []
+	for cell_id in ids {
+		var $current = cell_id
+		var $skip = Bool.False
+
+		# Already covered by the cell before it.
+		if !$out.is_empty() {
+			last = $out.get($out.len() - 1) ?? $current
+			if last.contains($current) {
+				$skip = Bool.True
+			}
+		}
+
+		if !$skip {
+			# This cell swallows the ones before it.
+			while !$out.is_empty() and $current.contains($out.get($out.len() - 1) ?? $current) {
+				$out = $out.drop_last(1)
+			}
+
+			# Four siblings collapse into their parent, which may then
+			# complete another set of four.
+			var $merging = Bool.True
+			while $merging and $out.len() >= 3 {
+				a = ($out.get($out.len() - 3) ?? $current).id()
+				b = ($out.get($out.len() - 2) ?? $current).id()
+				c = ($out.get($out.len() - 1) ?? $current).id()
+				if a.bitwise_xor(b).bitwise_xor(c) != $current.id() {
+					$merging = Bool.False
+				} else {
+					step = $current.lsb().shl_wrap(1)
+					mask = step.plus_wrap(step.shl_wrap(1)).bitwise_not()
+					wanted = $current.id().bitwise_and(mask)
+					if a.bitwise_and(mask) != wanted
+						or b.bitwise_and(mask) != wanted
+						or c.bitwise_and(mask) != wanted
+						or $current.is_face() {
+						$merging = Bool.False
+					} else {
+						$out = $out.drop_last(3)
+						$current = $current.parent()
+					}
+				}
+			}
+			$out = $out.append($current)
+		}
+	}
+	$out
+}
+
+## The index of the first cell not less than `target`.
+lower_bound : S2CellUnion, S2CellId -> U64
+lower_bound = |u, target| {
+	var $low = 0
+	var $high = u.ids.len()
+	while $low < $high {
+		mid = $low + ($high - $low) / 2
+		if (u.ids.get(mid) ?? S2CellId.sentinel()).id() < target.id() {
+			$low = mid + 1
+		} else {
+			$high = mid
+		}
+	}
+	$low
+}
+
+## The part of one cell that `other` does not cover, refining the cell
+## only where the two actually overlap.
+difference_of_cell : S2CellId, S2CellUnion -> List(S2CellId)
+difference_of_cell = |cell_id, other| {
+	if !other.intersects_cell_id(cell_id) {
+		[cell_id]
+	} else if other.contains_cell_id(cell_id) {
+		[]
+	} else if cell_id.is_leaf() {
+		[]
+	} else {
+		var $out = []
+		for child in cell_id.children() {
+			$out = $out.concat(difference_of_cell(child, other))
+		}
+		$out
+	}
 }

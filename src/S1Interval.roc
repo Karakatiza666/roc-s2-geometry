@@ -19,12 +19,6 @@ S1Interval := { lo : F64, hi : F64 }.{
 		{ lo: clamped_lo, hi: clamped_hi }
 	}
 
-	## The interval from `lo` to `hi` with no endpoint normalization.
-	##
-	## Only correct when both endpoints are known to be normalized already.
-	new_unchecked : F64, F64 -> S1Interval
-	new_unchecked = |lo, hi| { lo: lo, hi: hi }
-
 	## The empty interval, `(pi, -pi)`.
 	empty : () -> S1Interval
 	empty = || { lo: F64.pi, hi: -F64.pi }
@@ -47,21 +41,10 @@ S1Interval := { lo : F64, hi : F64 }.{
 	from_point_pair = |a, b| {
 		na = if (a == -F64.pi) F64.pi else a
 		nb = if (b == -F64.pi) F64.pi else b
-		if S1Interval.positive_distance(na, nb) <= F64.pi {
+		if positive_distance(na, nb) <= F64.pi {
 			{ lo: na, hi: nb }
 		} else {
 			{ lo: nb, hi: na }
-		}
-	}
-
-	## Counterclockwise distance from `a` to `b`, in `[0, 2pi)`.
-	positive_distance : F64, F64 -> F64
-	positive_distance = |a, b| {
-		d = b - a
-		if d >= 0.0 {
-			d
-		} else {
-			(b + F64.pi) - (a - F64.pi)
 		}
 	}
 
@@ -249,8 +232,8 @@ S1Interval := { lo : F64, hi : F64 }.{
 		if i.is_empty() or other.fast_contains_point(i.lo) {
 			return other
 		}
-		dlo = S1Interval.positive_distance(other.hi, i.lo)
-		dhi = S1Interval.positive_distance(i.hi, other.lo)
+		dlo = positive_distance(other.hi, i.lo)
+		dhi = positive_distance(i.hi, other.lo)
 		if dlo < dhi {
 			{ lo: other.lo, hi: i.hi }
 		} else {
@@ -293,8 +276,8 @@ S1Interval := { lo : F64, hi : F64 }.{
 		if i.is_empty() {
 			return { lo: q, hi: q }
 		}
-		dlo = S1Interval.positive_distance(q, i.lo)
-		dhi = S1Interval.positive_distance(i.hi, q)
+		dlo = positive_distance(q, i.lo)
+		dhi = positive_distance(i.hi, q)
 		if dlo < dhi {
 			{ lo: q, hi: i.hi }
 		} else {
@@ -309,8 +292,8 @@ S1Interval := { lo : F64, hi : F64 }.{
 		if i.fast_contains_point(q) {
 			return q
 		}
-		dlo = S1Interval.positive_distance(q, i.lo)
-		dhi = S1Interval.positive_distance(i.hi, q)
+		dlo = positive_distance(q, i.lo)
+		dhi = positive_distance(i.hi, q)
 		if dlo < dhi {
 			i.lo
 		} else {
@@ -320,20 +303,24 @@ S1Interval := { lo : F64, hi : F64 }.{
 
 	## Widened by `radius` on both sides, saturating at the full interval.
 	## A negative radius shrinks the interval.
+	##
+	## As upstream does, the full and empty tests allow a rounding error of one
+	## bit in each endpoint, so a result that rounding could make full or empty
+	## is reported as full or empty.
 	expanded : S1Interval, F64 -> S1Interval
 	expanded = |i, radius| {
 		if radius >= 0.0 {
 			if i.is_empty() {
 				return i
 			}
-			if i.length() + 2.0 * radius >= 2.0 * F64.pi {
+			if i.length() + 2.0 * radius + 2.0 * 2.220446049250313e-16 >= 2.0 * F64.pi {
 				return S1Interval.full()
 			}
 		} else {
 			if i.is_full() {
 				return i
 			}
-			if i.length() + 2.0 * radius <= 0.0 {
+			if i.length() + 2.0 * radius - 2.0 * 2.220446049250313e-16 <= 0.0 {
 				return S1Interval.empty()
 			}
 		}
@@ -355,38 +342,43 @@ S1Interval := { lo : F64, hi : F64 }.{
 		}
 		other_complement_center = other.complement_center()
 		if i.contains_point(other_complement_center) {
-			return S1Interval.positive_distance(other.hi, other_complement_center)
+			return positive_distance(other.hi, other_complement_center)
 		}
 		hi_hi =
 			if S1Interval.new(other.hi, other_complement_center).contains_point(i.hi) {
-				S1Interval.positive_distance(other.hi, i.hi)
+				positive_distance(other.hi, i.hi)
 			} else {
 				0.0
 			}
 		lo_lo =
 			if S1Interval.new(other_complement_center, other.lo).contains_point(i.lo) {
-				S1Interval.positive_distance(i.lo, other.lo)
+				positive_distance(i.lo, other.lo)
 			} else {
 				0.0
 			}
 		hi_hi.max(lo_lo)
 	}
 
-	## True when the endpoints agree to within `max_error`, comparing lengths
-	## when either interval is empty.
+	## True when the intervals agree to within `max_error`.
+	##
+	## An empty or full interval has no meaningful endpoints, so it is compared
+	## by length. Otherwise both endpoints must agree to within `max_error`
+	## and the lengths must agree to within `2 * max_error`, which rejects an
+	## interval and its inversion that have the same endpoints.
 	approx_eq : S1Interval, S1Interval, F64 -> Bool
 	approx_eq = |i, other, max_error| {
 		if i.is_empty() {
 			other.length() <= 2.0 * max_error
 		} else if other.is_empty() {
 			i.length() <= 2.0 * max_error
-		} else if i.is_full() or other.is_full() {
-			(i.is_full() and other.length() >= 2.0 * F64.pi - 2.0 * max_error)
-				or (other.is_full() and i.length() >= 2.0 * F64.pi - 2.0 * max_error)
+		} else if i.is_full() {
+			other.length() >= 2.0 * (F64.pi - max_error)
+		} else if other.is_full() {
+			i.length() >= 2.0 * (F64.pi - max_error)
 		} else {
-			S2Math.remainder(other.lo - i.lo, 2.0 * F64.pi).abs()
-				+ S2Math.remainder(other.hi - i.hi, 2.0 * F64.pi).abs()
-				<= 2.0 * max_error
+			S2Math.remainder(other.lo - i.lo, 2.0 * F64.pi).abs() <= max_error
+				and S2Math.remainder(other.hi - i.hi, 2.0 * F64.pi).abs() <= max_error
+				and (i.length() - other.length()).abs() <= 2.0 * max_error
 		}
 	}
 
@@ -435,6 +427,34 @@ expect S1Interval.new(0.0, 1.0).project(0.5) == 0.5
 expect S1Interval.new(0.2, 0.8).expanded(0.1).approx_eq(S1Interval.new(0.1, 0.9), 1e-15)
 expect S1Interval.new(0.0, F64.pi).expanded(F64.pi).is_full()
 expect S1Interval.empty().expanded(1.0).is_empty()
+expect {
+	# Two units in the last place below pi: rounding of the endpoints could
+	# close the gap, so the expansion by zero is already full.
+	S1Interval.new(-F64.pi, F64.pi - 8.881784197001252e-16).expanded(0.0).is_full()
+}
+expect S1Interval.new(0.0, 1.0).expanded(-0.49999999999999994).is_empty()
+expect !S1Interval.new(0.0, 1.0).approx_eq(S1Interval.new(0.15, 1.0), 0.1)
+expect S1Interval.new(0.0, 1.0).approx_eq(S1Interval.new(0.05, 0.95), 0.1)
+expect !S1Interval.new(-3.0, 3.0).approx_eq(S1Interval.new(3.0, -3.0), 0.3)
+expect S1Interval.full().approx_eq(S1Interval.new(-F64.pi, F64.pi - 0.01), 0.01)
+expect S1Interval.empty().approx_eq(S1Interval.from_point(1.0), 0.01)
 expect S1Interval.new(0.0, 1.0).complement() == S1Interval.new(1.0, 0.0)
 expect S1Interval.from_point(0.0).complement().is_full()
 expect S1Interval.new(0.0, 1.0).directed_hausdorff_distance(S1Interval.new(0.0, 1.0)) == 0.0
+
+## The interval from `lo` to `hi` with no endpoint normalization.
+##
+## Only correct when both endpoints are known to be normalized already.
+new_unchecked : F64, F64 -> S1Interval
+new_unchecked = |lo, hi| { lo: lo, hi: hi }
+
+## Counterclockwise distance from `a` to `b`, in `[0, 2pi)`.
+positive_distance : F64, F64 -> F64
+positive_distance = |a, b| {
+	d = b - a
+	if d >= 0.0 {
+		d
+	} else {
+		(b + F64.pi) - (a - F64.pi)
+	}
+}

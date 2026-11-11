@@ -1,5 +1,5 @@
 ## Floating-point helpers the S2 algorithms need that the builtins do not
-## provide: `floor`, `ceil`, `atan2`, `remainder`, and the `frexp`/`ldexp`
+## provide: `floor`, `ceil`, `round`, `atan2`, `remainder`, and the `frexp`/`ldexp`
 ## exponent manipulation the cell metrics are defined in terms of.
 ##
 ## Internal to this package.
@@ -7,11 +7,11 @@ S2Math := [].{
 
 	## Largest integral value not greater than `x`, as an `F64`.
 	##
-	## Exact for every `x` whose magnitude fits in an `I64`, which covers
-	## every value S2 feeds it.
+	## Exact for every finite `x`. A value of magnitude 2^52 or more is
+	## already an integer, so it is returned as it is.
 	floor : F64 -> F64
 	floor = |x| {
-		if !x.is_finite() {
+		if !x.is_finite() or x.abs() >= 4503599627370496.0 {
 			return x
 		}
 		truncated = x.to_i64_wrap().to_f64()
@@ -19,22 +19,31 @@ S2Math := [].{
 	}
 
 	## Smallest integral value not less than `x`, as an `F64`.
+	##
+	## A value of magnitude 2^52 or more is already an integer, so it is
+	## returned as it is.
 	ceil : F64 -> F64
 	ceil = |x| {
-		if !x.is_finite() {
+		if !x.is_finite() or x.abs() >= 4503599627370496.0 {
 			return x
 		}
 		truncated = x.to_i64_wrap().to_f64()
 		if (truncated < x) truncated + 1.0 else truncated
 	}
 
-	## Rounds half away from zero, matching C's `lround`.
+	## Rounds half away from zero, matching C's `round`.
+	##
+	## The fraction is taken from `floor`, not from `x + 0.5`, because that sum
+	## rounds up for 0.49999999999999994 and for values of 2^52 or more.
 	round : F64 -> F64
 	round = |x| {
 		if !x.is_finite() {
 			return x
 		}
-		if (x < 0.0) -S2Math.floor(-x + 0.5) else S2Math.floor(x + 0.5)
+		magnitude = x.abs()
+		low = S2Math.floor(magnitude)
+		rounded = if (magnitude - low >= 0.5) low + 1.0 else low
+		if (x < 0.0) -rounded else rounded
 	}
 
 	## Rounds half to even, the tie-break IEEE 754 rounding uses.
@@ -59,19 +68,59 @@ S2Math := [].{
 	## The IEEE 754 remainder of `x / y`: `x - y * n`, where `n` is `x / y`
 	## rounded half to even. Unlike `%` the result may be negative, and its
 	## magnitude never exceeds `|y| / 2`.
+	##
+	## The result is exact for every finite `x` and `y`, as C's `remainder`
+	## is. It comes from binary long division: every step subtracts a power
+	## of two times `|y|`, and each such subtraction is exact. The cost is
+	## proportional to the difference of the binary exponents of `x` and
+	## `y`, so it is a few steps for the angles S2 uses and about 1000 steps
+	## at most. Gives NaN when `x` is infinite or NaN, when `y` is zero or
+	## NaN, and gives `x` when `y` is infinite.
 	remainder : F64, F64 -> F64
 	remainder = |x, y| {
-		if y == 0.0 or !x.is_finite() {
+		if x.is_nan() or y.is_nan() or y == 0.0 or !x.is_finite() {
 			return F64.nan
 		}
-		x - y * S2Math.round_half_even(x / y)
+		if !y.is_finite() {
+			return x
+		}
+		ay = y.abs()
+		var $r = x.abs()
+		var $t = ay
+		while $t * 2.0 <= $r {
+			$t = $t * 2.0
+		}
+		# Now `$r < 2 * $t` whenever `$r >= ay`; each subtraction keeps it so.
+		var $odd = Bool.False
+		var $more = $r >= ay
+		while $more {
+			if $r >= $t {
+				$r = $r - $t
+				$odd = Bool.True
+			} else {
+				$odd = Bool.False
+			}
+			if $t == ay {
+				$more = Bool.False
+			} else {
+				$t = $t * 0.5
+			}
+		}
+		half = ay * 0.5
+		if $r > half or ($r == half and $odd) {
+			$r = $r - ay
+		}
+		result = $r
+		if (x < 0.0) -result else result
 	}
 
 	## Angle in radians from the positive x-axis to the point `(x, y)`,
 	## in `[-pi, pi]`.
 	atan2 : F64, F64 -> F64
 	atan2 = |y, x| {
-		if x > 0.0 {
+		if x.is_nan() or y.is_nan() {
+			F64.nan
+		} else if x > 0.0 {
 			(y / x).atan()
 		} else if x < 0.0 {
 			if y >= 0.0 {
@@ -159,3 +208,25 @@ expect S2Math.frexp_exponent(1.0) == 1
 expect S2Math.frexp_exponent(0.5) == 0
 expect S2Math.frexp_exponent(1024.0) == 11
 expect S2Math.frexp_exponent(0.0) == 0
+expect S2Math.floor(1e20) == 1e20
+expect S2Math.floor(-1e20) == -1e20
+expect S2Math.ceil(-1e300) == -1e300
+expect S2Math.floor(4503599627370497.0) == 4503599627370497.0
+expect S2Math.round(0.49999999999999994) == 0.0
+expect S2Math.round(-0.49999999999999994) == 0.0
+expect S2Math.round(4503599627370497.0) == 4503599627370497.0
+expect S2Math.round(-4503599627370497.0) == -4503599627370497.0
+expect S2Math.round(-2.5) == -3.0
+expect S2Math.round(1.4999999999999998) == 1.0
+expect S2Math.remainder(1e20, 8.0) == 0.0
+expect S2Math.remainder(1e20, 3.0) == 1.0
+expect S2Math.remainder(-1e20, 3.0) == -1.0
+expect S2Math.remainder(1e20, 7.0) == 2.0
+expect S2Math.remainder(7.0, 2.0) == -1.0
+expect S2Math.remainder(5.0, F64.infinity) == 5.0
+expect S2Math.remainder(0.25, 1.0) == 0.25
+expect S2Math.remainder(3.0, 2.0) == -1.0
+expect S2Math.remainder(F64.infinity, 1.0).is_nan()
+expect S2Math.remainder(1.0, 0.0).is_nan()
+expect S2Math.atan2(F64.nan, 1.0).is_nan()
+expect S2Math.atan2(1.0, F64.nan).is_nan()

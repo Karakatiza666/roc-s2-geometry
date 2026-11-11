@@ -28,11 +28,13 @@ S2PolygonTest := [].{
 		points.map(|(lat, lng)| S2LatLng.from_degrees(lat, lng).to_point()),
 	)
 
+	## Normalizes each loop first, as upstream's `s2textformat::MakePolygon`
+	## does for the polygons in its tables.
 	polygon_of : List(List((F64, F64))), Bool -> S2Polygon
 	polygon_of = |loops, is_full| if is_full {
 		S2Polygon.full()
 	} else {
-		S2Polygon.from_loops(loops.map(S2PolygonTest.loop_of))
+		S2Polygon.from_loops(loops.map(|points| S2PolygonTest.loop_of(points).normalized()))
 	}
 
 	## 0 when the claim holds, 1 when it does not.
@@ -181,6 +183,19 @@ expect {
 		}
 	}
 	$ok
+}
+
+# The six faces cover the full loop and the full polygon, inside and out, and
+# nothing covers the empty ones. The sentinel vertex of each is not a boundary point.
+expect {
+	faces = [0, 1, 2, 3, 4, 5].map(S2CellId.from_face)
+	coverer = S2RegionCoverer.default()
+	coverer.covering(S2Loop.full()) == faces
+		and coverer.covering(S2Polygon.full()) == faces
+		and coverer.interior_covering(S2Loop.full()) == faces
+		and coverer.interior_covering(S2Polygon.full()) == faces
+		and coverer.covering(S2Loop.empty()).is_empty()
+		and coverer.covering(S2Polygon.empty()).is_empty()
 }
 
 # The empty and full polygons behave as the identities of containment.
