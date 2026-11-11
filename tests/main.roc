@@ -12,6 +12,7 @@ package
 	}
 
 import CodingCorpus
+import S2ClippingTest
 import S2CellIdTest
 import S2CellTest
 import S2CodingTest

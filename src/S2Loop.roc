@@ -702,9 +702,10 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 	## `origin_inside`, the nesting depth as a 32-bit integer, and the
 	## encoding of the bounding rectangle (`S2LatLngRect.encode`).
 	##
-	## A loop on its own has depth 0. The loops of a polygon are written by
-	## `S2Polygon.encode` with their own depths. The compressed form of
-	## upstream's loop is not written.
+	## A loop on its own has depth 0. `S2Polygon.encode_uncompressed` writes
+	## the loops of a polygon in this format with their own depths. Upstream's
+	## loop has a compressed form only inside a compressed polygon, which
+	## `S2Polygon.encode` writes.
 	encode : S2Loop -> List(U8)
 	encode = |loop| encode_with_depth(loop, 0)
 

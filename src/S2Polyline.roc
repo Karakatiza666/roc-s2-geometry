@@ -12,6 +12,7 @@ import Internal/S2Math
 import S2Point
 import S2Predicates
 import Internal/S2Coder
+import S2PointCompression
 
 ## A sequence of points joined by geodesic edges.
 ##
@@ -479,29 +480,65 @@ S2Polyline := { vertices : List(S2Point) }.{
 	to_inspect : S2Polyline -> Str
 	to_inspect = |line| "S2Polyline(${line.vertices.len().to_str()} vertices)"
 
+	## The bytes that upstream's `S2Polyline::Encode` writes with its
+	## default hint, which are those of `encode_uncompressed`.
+	encode : S2Polyline -> List(U8)
+	encode = |line| line.encode_uncompressed()
+
 	## The bytes that upstream's `S2Polyline::EncodeUncompressed` writes: the
 	## version byte 1, the number of vertices as a little-endian 32-bit
 	## integer, and the vertices as three little-endian IEEE 754 doubles each.
-	## This is the lossless format. `EncodeMostCompact` is not ported.
-	encode : S2Polyline -> List(U8)
-	encode = |line|
+	## This is the lossless format.
+	encode_uncompressed : S2Polyline -> List(U8)
+	encode_uncompressed = |line|
 		line.vertices.fold(
 			[1] |> S2Coder.put_u32(line.vertices.len()),
 			|out, p| out.concat(p.encode()),
 		)
 
-	## The polyline that `encode` writes. Bytes after the vertices are
-	## ignored. The polyline is not checked, so `is_valid` tells whether it is
-	## well formed.
+	## The bytes that upstream's `S2Polyline::EncodeMostCompact` writes: the
+	## compressed format when it is smaller, and `encode_uncompressed`
+	## otherwise.
 	##
-	## The version byte 2 is upstream's compressed format, which this port does
-	## not read: that is `UnsupportedCompressedEncoding`. Any other version
-	## byte than 1 is `UnsupportedVersion`.
-	decode : List(U8) -> Try(S2Polyline, [Truncated, UnsupportedVersion(U8), UnsupportedCompressedEncoding])
+	## The compressed format is the version byte 2, the snap level, the
+	## number of vertices as a varint, and the vertices in the format of
+	## `S2PointCompression.encode_points_compressed`. The snap level is the
+	## level whose cell centres most of the vertices are, the lowest such
+	## level on a tie. It is chosen when about 4 bytes for each vertex, plus
+	## 26 for each vertex that is not such a centre, is less than the 24
+	## bytes for each vertex of the lossless format. The empty polyline is
+	## always compressed. Both formats are lossless.
+	encode_most_compact : S2Polyline -> List(U8)
+	encode_most_compact = |line| {
+		all = line.vertices.map(S2PointCompression.xyz_face_si_ti)
+		level =
+			if all.is_empty() {
+				30
+			} else {
+				match compact_snap_level(all) {
+					Ok(l) => l
+					Err(Lossless) => return line.encode_uncompressed()
+				}
+			}
+		[2, level.to_u8_wrap()]
+			|> S2Coder.put_varint32(all.len())
+			|> List.concat(S2PointCompression.encode_points_compressed(all, level))
+	}
+
+	## The polyline that any of the `encode` functions writes. Bytes after the
+	## vertices are ignored. The polyline is not checked, so `is_valid`
+	## tells whether it is well formed.
+	##
+	## A version byte other than 1 or 2 is `UnsupportedVersion`. In the
+	## compressed format, a snap level above 30, and the errors of
+	## `S2PointCompression.decode_points_compressed`, are `InvalidEncoding`
+	## or `BadVarint`. A vertex count larger than the number of bytes left
+	## is `Truncated`, as upstream refuses it before reading the vertices.
+	decode : List(U8) -> Try(S2Polyline, [Truncated, UnsupportedVersion(U8), BadVarint, InvalidEncoding])
 	decode = |bytes| {
 		version = S2Coder.get_u8(bytes, 0)?
 		if version == 2 {
-			return Err(UnsupportedCompressedEncoding)
+			return decode_compressed(bytes)
 		}
 		if version != 1 {
 			return Err(UnsupportedVersion(version))
@@ -512,6 +549,46 @@ S2Polyline := { vertices : List(S2Point) }.{
 			$vertices = $vertices.append(S2Point.decode(bytes.drop_first(5 + i * 24))?)
 		}
 		Ok({ vertices: $vertices })
+	}
+}
+
+## The compressed format of `encode_most_compact`, after the version byte.
+decode_compressed : List(U8) -> Try(S2Polyline, [Truncated, BadVarint, InvalidEncoding])
+decode_compressed = |bytes| {
+	snap_level = S2Coder.get_u8(bytes, 1)?
+	if snap_level > 30 {
+		return Err(InvalidEncoding)
+	}
+	(count, pos) = S2Coder.get_varint32(bytes, 2)?
+	if count == 0 {
+		return Ok({ vertices: [] })
+	}
+	# Each vertex takes at least one byte.
+	if count > bytes.len() - pos {
+		return Err(Truncated)
+	}
+	decoded = S2PointCompression.decode_points_compressed(bytes.drop_first(pos), count, snap_level.to_u64())?
+	Ok({ vertices: decoded.points })
+}
+
+## Upstream's choice of format in `EncodeMostCompact`: the level whose cell
+## centres most of the points are, the lowest on a tie, when the compressed
+## format is estimated to be smaller, and `Err(Lossless)` otherwise.
+compact_snap_level : List(S2PointCompression.S2XYZFaceSiTi) -> Try(U64, [Lossless])
+compact_snap_level = |all| {
+	histogram = all.fold(
+		List.repeat(0.U64, 31),
+		|counts, v| match v.cell_level {
+			Ok(level) => counts.update(level, |c| c + 1) ?? counts
+			Err(_) => counts
+		},
+	)
+	(level, snapped) = histogram.fold_with_index((0, 0), |(best, best_count), count, i| if (count > best_count) (i, count) else (best, best_count))
+	n = all.len()
+	if 4 * n + 26 * (n - snapped) < 24 * n {
+		Ok(level)
+	} else {
+		Err(Lossless)
 	}
 }
 
@@ -855,9 +932,19 @@ expect S2Polyline.decode(S2Coder.from_hex("0101000000000000000000f03f00000000000
 expect S2Coder.to_hex(S2Polyline.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)]).encode()) == "0103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f"
 expect S2Polyline.decode(S2Coder.from_hex("0103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f")) == Ok(S2Polyline.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)]))
 
-# The compressed format is not read, and any other version is not known.
-expect S2Polyline.decode(S2Coder.from_hex("021e0000")) == Err(UnsupportedCompressedEncoding)
-expect S2Polyline.decode(S2Coder.from_hex("0203000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f")) == Err(UnsupportedCompressedEncoding)
+# Upstream's `EncodeMostCompact`. The empty polyline is always compressed,
+# and these three vertices are centres of cells at level 0.
+expect S2Coder.to_hex(S2Polyline.empty().encode_most_compact()) == "021e0000"
+expect S2Polyline.decode(S2Coder.from_hex("021e0000")) == Ok(S2Polyline.empty())
+expect S2Coder.to_hex(S2Polyline.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)]).encode_most_compact()) == "020003060708000000"
+expect S2Polyline.decode(S2Coder.from_hex("020003060708000000")) == Ok(S2Polyline.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)]))
+expect S2Coder.to_hex(S2Polyline.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)]).encode_uncompressed()) == S2Coder.to_hex(S2Polyline.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)]).encode())
+# The version byte 2 with the bytes of the lossless format: snap level 3 and
+# then a vertex count of 0, which upstream reads as the empty polyline.
+expect S2Polyline.decode(S2Coder.from_hex("0203000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f")) == Ok(S2Polyline.empty())
+# A snap level above 30.
+expect S2Polyline.decode(S2Coder.from_hex("021f0000")) == Err(InvalidEncoding)
+# Any other version is not known.
 expect S2Polyline.decode(S2Coder.from_hex("0303000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f")) == Err(UnsupportedVersion(3))
 expect S2Polyline.decode(S2Coder.from_hex("0003000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f")) == Err(UnsupportedVersion(0))
 expect S2Polyline.decode([]) == Err(Truncated)

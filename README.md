@@ -93,10 +93,12 @@ With no arguments it covers the same 2 km around San Francisco.
 | `S2PolylineAlignment` | Vertex alignments between polylines by dynamic time warping, and the medoid or consensus of a set of them |
 | `S2Polygon` | Loops nested into a region with holes, and the predicates between two of them |
 | `S2PointRegion` | A single point as a region, so that a coverer can cover it |
+| `S2PointCompression` | The compressed encoding of points that are mostly cell centres, which the compressed polylines and polygons use |
 | `S2ConvexHullQuery` | The smallest convex loop around a set of points, polylines, loops and polygons |
 | `S2Edge` | Edge crossings, intersections, interpolation, and distances between points and edges and between two edges |
 | `S2EdgeCrosser` | Tests one edge against a chain of others, reusing work between the tests |
-| `S2Predicates` | Orientation and distance comparisons that are exact rather than merely careful |
+| `S2EdgeClipping` | Clips an edge to the faces of the cube it crosses, and an edge in the plane of a face to a rectangle |
+| `S2Predicates` | Orientation, distance, circumcenter and Voronoi comparisons that are exact rather than merely careful |
 | `S2PaddedCell` | A cell with a padded `(u, v)` bound, for descending the cell hierarchy |
 | `S2LatLngRectBounder` | The bounding rectangle of a chain of edges, built one vertex at a time |
 | `S2Projection` `S2EdgeTessellator` | The plate carree and Mercator projections, and the conversion of an edge between geodesic and projected form |
@@ -108,15 +110,19 @@ operations built on it. Those build new geometry out of old, as
 `S2BooleanOperation` does when it returns the polygon where two others overlap,
 and they carry the machinery upstream needs to snap and rebuild the result.
 
-Binary encoding is ported in its lossless form. `S2Point`, `S2LatLng`, `S2Cap`,
-`S2LatLngRect`, `S2CellId`, `S2Cell`, `S2CellUnion`, `S2PointRegion`, `S2Loop`,
-`S2Polyline` and `S2Polygon` each have `encode : T -> List(U8)` and
+Binary encoding is ported. `S2Point`, `S2LatLng`, `S2Cap`, `S2LatLngRect`,
+`S2CellId`, `S2Cell`, `S2CellUnion`, `S2PointRegion`, `S2Loop`, `S2Polyline`
+and `S2Polygon` each have `encode : T -> List(U8)` and
 `decode : List(U8) -> Try(T, [...])`. The bytes are those of upstream's
-`Encode`, and `decode` reads what upstream's `Decode` reads. The compressed
-formats of `S2Polyline`, `S2Polygon` and `S2Loop` are not ported: `decode`
-gives `Err(UnsupportedCompressedEncoding)` for them. A loop on its own has no
-depth, so `S2Loop.decode` drops the depth field and `S2Loop.encode` writes 0.
-The polygon keeps the depth of each of its loops.
+`Encode`, and `decode` reads what upstream's `Decode` reads, the compressed
+formats included. As upstream's do, `S2Polygon.encode` writes the compressed
+format when the vertices are mostly cell centres and that format is smaller,
+and `S2Polyline.encode` writes the lossless one. `S2Polygon.encode_uncompressed`
+and `S2Polyline.encode_most_compact` give the other choice. Both formats are
+lossless. A loop on its own has no depth, so `S2Loop.decode` drops the depth
+field and `S2Loop.encode` writes 0. The polygon keeps the depth of each of its
+loops. The encoded vector types of upstream's `s2coder`, which only its shape
+index uses, are not ported.
 
 Asking whether one region contains or meets another is a different question,
 and it is answered here: `S2Loop.contains`, `S2Loop.intersects`,
@@ -205,22 +211,25 @@ floating-point expansions, which represent a sum of products of doubles as a
 list of non-overlapping doubles and lose nothing at any step. That arithmetic
 lives in the package's internal `S2Exact`.
 Points that are exactly collinear are resolved by a symbolic perturbation, so
-the answer is never zero and never inconsistent. The distance comparisons of
-`S2Predicates` and the intersection point of `S2Edge.intersection` escalate
+the answer is never zero and never inconsistent. The distance comparisons, the
+circumcenter and Voronoi tests of `S2Predicates`, the intersection point of
+`S2Edge.intersection`, and the cross product of `S2Point.robust_cross` escalate
 the same way. Upstream tries `long double` precision between the rounded and
 the exact step; this port goes straight to exact arithmetic, which gives the
-same answers. The exact arithmetic has one
+same answers. For `robust_cross`, where upstream's `long double` step gives a
+result twice as long and can differ in the last digit of its direction, the
+exact one is within the same error bound. The exact arithmetic has one
 limit: the error term of a product of two doubles is exact only while it does
 not underflow, so a product with a magnitude below about 1e-290 can lose bits
-or become zero.
+or become zero. `robust_cross` scales its inputs first, so it stays exact for
+coordinates down to the smallest subnormal unless two tiny coordinates are
+multiplied together.
 
-The costs of that fidelity are documented where they apply. `S2Point.robust_cross`
-uses the long-standing stable formulation rather than upstream's current
-exact-arithmetic one, so the direction it picks for exactly proportional inputs
-is arbitrary rather than canonical. That reaches the functions built on it,
-such as `S2Edge.point_on_line` for antipodal endpoints. The port's own
+The costs of that fidelity are documented where they apply. The port's own
 `atan2` and the builtin trigonometry can differ from the C library by one unit
-in the last place, so a latitude or a distance occasionally does too. `S2Loop`
+in the last place, so a latitude or a distance occasionally does too. That
+includes the bound of a loop that `S2Polygon.decode` computes for a compressed
+polygon, which stores no bound for a loop of fewer than 64 vertices. `S2Loop`
 and `S2Polygon` have no spatial index, so their cell tests and distances are
 linear in the vertex count, and `is_valid` and the predicates between two
 shapes are quadratic.
@@ -242,9 +251,9 @@ and from upstream's test files, and fails if they differ from the committed
 ones. It does not regenerate `CoverCorpus`, because its oracle needs a C++
 build of upstream.
 
-There are 777 assertions. `roc test src/main.roc` runs the 666 unit tests
+There are 3043 assertions. `roc test src/main.roc` runs the 2901 unit tests
 written alongside the modules they cover. `roc test tests/main.roc` runs the
-111 corpus sweeps, each of which walks every case in one golden corpus. It
+142 corpus sweeps, each of which walks every case in one golden corpus. It
 also runs the unit tests of every module the sweeps import, but not of a module
 none of them imports, so the script runs both.
 
@@ -268,6 +277,7 @@ wrong:
 | `ExactCorpus` | 200 | determinant signs, against Python's rational arithmetic rather than another port |
 | `LoopRelationCorpus` | 86 | which of two loops contains the other, whether they are disjoint, and whether they cover the sphere, from `s2loop_test.cc` |
 | `PolygonCorpus` | 86 | polygon containment and intersection, nesting, and point containment, from `s2polygon_test.cc` |
+| `ClippingCorpus` | 225 | 80 edges on the sphere and 145 in the plane: the faces an edge crosses, clipping to padded faces and to rectangles, from upstream's C++ through `tools/s2_oracle.cc` in the manner of `s2edge_clipping_test.cc` |
 
 `S2Loop` and `S2Polyline` have no counterpart in s2sphere, so `S2ShapeTest`
 pins their measurements to cell geometry instead: a loop through a cell's four
@@ -292,6 +302,9 @@ curl -sSLO https://raw.githubusercontent.com/google/s2geometry/v0.14.0/src/s2/s2
 curl -sSLO https://raw.githubusercontent.com/google/s2geometry/v0.14.0/src/s2/s2polygon_test.cc
 python3 tools/generate_loop_corpus.py s2loop_test.cc
 python3 tools/generate_polygon_corpus.py s2polygon_test.cc
+
+python3 tools/generate_coding_corpus.py path/to/s2_oracle > tests/CodingCorpus.roc
+python3 tools/generate_clipping_corpus.py path/to/s2_oracle > tests/ClippingCorpus.roc
 
 roc fmt tests
 ```

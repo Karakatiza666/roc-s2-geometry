@@ -13,6 +13,14 @@ It also asks upstream for a verdict on malformed input: whether `Decode`
 accepts it, and what encoding of the decoded value it then gives. It checks
 that upstream refuses every truncation of one sample of each type.
 
+The compressed formats come from the fixtures of upstream's
+s2point_compression_test.cc (regular loops snapped to a level, loops with some
+points not snapped, a loop over several faces, a straight line, and a first
+point on the edge of a face), and from polylines and polygons whose vertices
+are mostly cell centres. Upstream's `S2EncodePointsCompressed` writes the
+points, `EncodeMostCompact` the polylines, and `Encode` with its default hint
+the polygons.
+
 Usage:
 
     python3 tools/generate_coding_corpus.py .tmp/oracle14/build/s2_oracle > tests/CodingCorpus.roc
@@ -81,6 +89,74 @@ def parse_loop(b, o):
     assert b[o] == 1
     bound = tuple(doubles(b[o + 1 :], 4))
     return pts, bound, o + 33
+
+
+# Compressed formats ------------------------------------------------------
+
+def snap_points(points, level):
+    out = ask([f"cell_snap {p[0]!r} {p[1]!r} {p[2]!r} {level}" for p in points])
+    return [tuple(map(float, line.split())) for line in out]
+
+
+def regular(n, km=0.1):
+    # S2Testing::MakeRegularPoints around (1, 1, 1) with a radius in km.
+    degrees = km / 6371.01 * 180 / math.pi
+    v = list(map(float, ask([f"loop_regular N 1 1 1 {degrees!r} {n}"])[0].split()))
+    return [tuple(v[3 * i : 3 * i + 3]) for i in range(n)]
+
+
+def raw_chain(points):
+    return f"{len(points)} " + " ".join("%r %r %r" % p for p in points)
+
+
+def compression_fixtures():
+    """The fixtures of upstream's S2PointCompressionTest, with the encoded size
+    that upstream's test expects, or None."""
+    loop_100 = regular(100)
+    mixed_15 = list(loop_100)
+    for i in range(15):
+        mixed_15[3 * i] = snap_points([mixed_15[3 * i]], 30)[0]
+    mixed_25 = list(loop_100)
+    for i in range(25):
+        mixed_25[4 * i] = snap_points([mixed_25[4 * i]], 30)[0]
+    faces = []
+    for face, u, v in ((0, -0.5, 0.5), (1, -0.5, 0.5), (1, 0.5, -0.5), (2, -0.5, 0.5), (2, 0.5, -0.5), (2, 0.5, 0.5)):
+        xyz = {0: (1.0, u, v), 1: (-u, 1.0, v), 2: (-u, -v, 1.0)}[face]
+        faces.append(normalized_point(xyz))
+    line = []
+    for i in range(100):
+        u = st_to_uv(0.01 + 0.005 * i)
+        v = st_to_uv(0.01 + 0.009 * i)
+        line.append(normalized_point((1.0, u, v)))
+    return [
+        ("empty", 30, [], 1),
+        ("loop_4", 30, snap_points(regular(4), 30), 39),
+        ("loop_4_unsnapped", 30, regular(4), None),
+        ("loop_4_level_14", 14, snap_points(regular(4), 14), 23),
+        ("loop_100", 30, snap_points(loop_100, 30), 257),
+        ("loop_100_unsnapped", 30, loop_100, 2756),
+        ("loop_100_mixed_15", 30, mixed_15, 2381),
+        ("loop_100_mixed_25", 30, mixed_25, 2131),
+        ("loop_100_level_22", 22, snap_points(loop_100, 22), 148),
+        ("multi_face", 30, snap_points(faces, 30), None),
+        ("line", 30, snap_points(line, 30), 117),
+        ("first_point_on_face_edge", 8, [
+            (0.054299323861222645, -0.70606358900180299, 0.70606358900180299),
+            (0.056482651436986935, -0.70781701406865505, 0.70413406726388494),
+        ], None),
+        ("level_0", 0, snap_points([(1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0)], 0), None),
+    ]
+
+
+def st_to_uv(s_):
+    # S2::STtoUV, the quadratic projection.
+    if s_ >= 0.5:
+        return (1 / 3.0) * (4 * s_ * s_ - 1)
+    return (1 / 3.0) * (1 - 4 * (1 - s_) * (1 - s_))
+
+
+def normalized_point(p):
+    return tuple(map(float, ask([f"point2 mul N {p[0]!r} {p[1]!r} {p[2]!r} 1 1 1"])[0].split()))
 
 
 # Values -----------------------------------------------------------------
@@ -259,6 +335,81 @@ def main():
     section("polygons", "A polygon in the lossless format, with the vertices and the bound of each loop.",
             f"{{ hex : Str, loops : List({{ vertices : List({xyz}), bound : (F64, F64, F64, F64) }}) }}", rows)
 
+    # Compressed points.
+    fixtures = compression_fixtures()
+    hs = enc([f"points {level} {raw_chain(pts)}" for _, level, pts, _ in fixtures])
+    rows = []
+    for (name, level, pts, size), h in zip(fixtures, hs):
+        if size is not None:
+            assert len(h) // 2 == size, (name, len(h) // 2, size)
+        back = ask([f"code_dec points {level} {len(pts)} {h}"])[0].split()
+        assert back[0] == "ok" and int(back[1]) == len(h) // 2, (name, back[:2])
+        decoded = [tuple(map(float, back[2 + 3 * i : 5 + 3 * i])) for i in range(len(pts))]
+        assert decoded == pts, name
+        rows.append(f'{{ name: "{name}", level: {level}, points: {points_list(pts)}, hex: "{h}" }}')
+    section("compressed_points", "Points in upstream's compressed format, which decode to the same points.",
+            f"{{ name : Str, level : U64, points : List({xyz}), hex : Str }}", rows)
+    point_sample = hs[1]
+
+    # Polylines in the most compact format.
+    snapped = {name: pts for name, _, pts, _ in fixtures}
+    level_10 = ["N " + ask([f"cell_point_raw {c}"])[0] for c in level_cells(10, 4, 1, 3)]
+    compact_lines = [
+        [],
+        snapped["loop_4"],
+        snapped["loop_100_level_22"],
+        snapped["loop_100_mixed_25"],
+        snapped["loop_100_mixed_15"],
+        snapped["multi_face"],
+        snapped["line"],
+        snapped["level_0"],
+    ]
+    hs = enc([f"line_compact {raw_chain(pts)}" for pts in compact_lines])
+    hexes["line_compact"] = hs
+    rows = [f'{{ vertices: {points_list(pts)}, hex: "{h}" }}' for pts, h in zip(compact_lines, hs)]
+    section("compact_lines", "Polylines as `EncodeMostCompact` writes them, compressed or not.",
+            f"{{ vertices : List({xyz}), hex : Str }}", rows)
+
+    # Polygons with the default hint.
+    hole = snap_points(regular(20, 0.03), 22)
+    mixed_22 = list(snapped["loop_100_unsnapped"])
+    for i in range(22):
+        mixed_22[4 * i] = snap_points([mixed_22[4 * i]], 30)[0]
+    polys = [
+        "0",
+        "1 1 0 0 -1",
+        "1 " + raw_chain(snapped["level_0"]),
+        "1 " + raw_chain(snapped["loop_4"]),
+        "1 " + raw_chain(snapped["loop_100_level_22"]),
+        "2 " + raw_chain(snapped["loop_100_level_22"]) + " " + raw_chain(hole),
+        "1 " + raw_chain(snapped["loop_100_mixed_25"]),
+        "1 " + raw_chain(snapped["loop_100_mixed_15"]),
+        "1 4 " + " ".join(level_10),
+        # 64 vertices, the fewest whose loop stores its bound.
+        "1 " + raw_chain(snap_points(regular(64), 30)),
+        # 78 of 100 vertices not snapped: just too many for the compressed
+        # format, which 75 of 100 are not.
+        "1 " + raw_chain(mixed_22),
+    ]
+    compact = enc([f"poly_compact {p}" for p in polys])
+    lossless = enc([f"poly {p}" for p in polys])
+    hexes["poly_compact"] = compact
+    rows = []
+    for c, l in zip(compact, lossless):
+        b = bytes.fromhex(l)
+        n = u32(b, 3)
+        o = 7
+        loops = []
+        for _ in range(n):
+            pts, bound, o = parse_loop(b, o)
+            loops.append(f"{{ vertices: {points_list(pts)}, bound: {tup(bound)} }}")
+        verdict = dec("poly", [c])[0]
+        assert verdict.startswith("ok "), verdict
+        rows.append(f'{{ hex: "{c}", loops: [{", ".join(loops)}], decoded: "{verdict[3:]}" }}')
+    section("compact_polygons", "Polygons as `Encode` writes them by default, with the vertices and the bound of\n"
+            "\t## each loop, and the lossless encoding of what `Decode` reads back from them.",
+            f"{{ hex : Str, loops : List({{ vertices : List({xyz}), bound : (F64, F64, F64, F64) }}), decoded : Str }}", rows)
+
     # Verdicts on bytes that are not a plain encoding.
     cases = []  # (kind, name, hex)
 
@@ -328,9 +479,44 @@ def main():
     for name, q in (
         ("compact snapped loop", f"poly_compact 1 {snap_chain}"),
         ("compact square", "poly_compact 1 4 L 0 0 L 0 10 L 10 10 L 10 0"),
-        ("compact empty", "poly_compact poly_empty"),
+        ("compact empty", "poly_compact 0"),
     ):
         add("poly", name, enc([q])[0])
+    # Malformed compressed bytes. The line and polygon samples are loop_4,
+    # whose faces are one run on face 0 and whose first point takes 8 bytes.
+    line4 = hexes["line_compact"][1]
+    poly4 = hexes["poly_compact"][3]
+    assert line4.startswith("021e04") and poly4.startswith("041e0104"), (line4, poly4)
+    for kind, h, head in (("line", line4, 3), ("poly", poly4, 4)):
+        add(kind, "compact level 31", mutate(h, 1, 31))
+        add(kind, "compact trailing bytes", h + "deadbeef")
+        # A face run of no points.
+        add(kind, "compact face run of 0", mutate(h, head, 0))
+        # More points written in full than there are points: the count after
+        # the first point and the three varints of the others.
+        b = bytes.fromhex(h)
+        add(kind, "compact bad varint", h[: 2 * head] + "ffffffffffffffffffff7f" + h[2 * head + 2 :])
+    # The off-center count of the line sample, at the end of its bytes.
+    lb = bytearray(bytes.fromhex(line4))
+    assert lb[-1] == 0
+    add("line", "compact 5 off-center points", bytes(lb[:-1] + bytes([5])).hex())
+    add("line", "compact off-center index 4", bytes(lb[:-1]).hex() + "0104" + "00" * 24)
+    add("line", "compact off-center index 3", bytes(lb[:-1]).hex() + "0103" + "000000000000f03f" + "00" * 16)
+    add("line", "compact count above bytes left", "021e05" + line4[6:])
+    add("line", "compact count 0 then bytes", "021e00" + line4[6:])
+    # Polygons: too many loops, a loop of no vertex, a bound flag on a loop
+    # without a bound, an empty loop, and a huge depth.
+    add("poly", "compact count 10000001", "041e" + "81ade204")
+    add("poly", "compact loop of no vertex", "041e0100" + poly4[8:])
+    pb = bytearray(bytes.fromhex(poly4))
+    assert pb[-2:] == bytes([0, 0]), poly4
+    add("poly", "compact bound flag", bytes(pb[:-2] + bytes([2, 0])).hex())
+    add("poly", "compact bound flag and bound", bytes(pb[:-2] + bytes([2, 0])).hex() + enc(["rect 0.1 0.2 0.3 0.4"])[0])
+    add("poly", "compact huge depth", bytes(pb[:-1]).hex() + "ffffffff0f")
+    add("poly", "compact origin inside", bytes(pb[:-2] + bytes([1, 0])).hex())
+    empty_loop = "01" + enc(["points 30 1 0 0 1"])[0] + "0000"
+    add("poly", "compact empty loop dropped", "041e02" + poly4[6:] + empty_loop)
+    add("poly", "compact only an empty loop", "041e01" + empty_loop)
 
     verdicts = []
     for kind in ("point", "latlng", "cap", "rect", "cellid", "cell", "union", "pointregion", "loop", "line", "poly"):
@@ -344,33 +530,39 @@ def main():
             else:
                 assert r.startswith("ok "), r
                 verdict = r[3:]
-                if kind == "line" and h.startswith("02"):
-                    verdict = "compressed"
-                if kind == "poly" and h.startswith("04"):
-                    verdict = "compressed"
             verdicts.append((k, name, h, verdict))
     rows = [f'{{ kind: "{k}", name: "{n}", hex: "{h}", verdict: "{v}" }}' for k, n, h, v in verdicts]
     section(
         "verdicts",
         "Bytes that are not a plain encoding, and what upstream makes of them. The verdict is `-` when\n"
-        "\t## `Decode` refuses them, `compressed` when they are in a compressed format that this port does not\n"
-        "\t## read, `invalid` for a cell with an invalid id that upstream would build without meaning, and\n"
+        "\t## `Decode` refuses them, `invalid` for a cell with an invalid id that upstream would build without\n"
+        "\t## meaning, and\n"
         "\t## otherwise the hex of what `Encode` gives for the value that `Decode` read.",
         "{ kind : Str, name : Str, hex : Str, verdict : Str }",
         rows,
     )
 
-    # Every truncation of one sample of each kind is refused.
-    for kind, h in samples.items():
+    # Every truncation of one sample of each kind is refused, and of the
+    # compressed line and polygon samples too.
+    sample_list = list(samples.items()) + [("line", line4), ("poly", poly4)]
+    for kind, h in sample_list:
         prefixes = [h[:i] or "-" for i in range(0, len(h), 2)]
         for r, p in zip(dec(kind, prefixes), prefixes):
             assert r == "err", (kind, p, r)
     w("\t## The sample of each kind whose truncations are all refused. Upstream refuses them too.")
     w("\ttruncation_samples : List({ kind : Str, hex : Str })")
     w("\ttruncation_samples = [")
-    for kind, h in samples.items():
+    for kind, h in sample_list:
         w(f'\t\t{{ kind: "{kind}", hex: "{h}" }},')
     w("\t]")
+    w("")
+    # And every truncation of compressed points.
+    prefixes = [point_sample[:i] or "-" for i in range(0, len(point_sample), 2)]
+    for r, p in zip(ask([f"code_dec points 30 4 {x}" for x in prefixes]), prefixes):
+        assert r == "err", (p, r)
+    w("\t## Compressed points, four at level 30, whose truncations are all refused, as upstream refuses them.")
+    w("\tpoint_truncation_sample : Str")
+    w(f'\tpoint_truncation_sample = "{point_sample}"')
     w("}")
     print("\n".join(out))
 

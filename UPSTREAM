@@ -40,8 +40,21 @@ s2geometry
 
              tests/CodingCorpus.roc holds the bytes that upstream's Encode
              methods write for points, caps, rectangles, cells, cell unions,
-             loops, polylines and polygons, and its verdicts on malformed
-             input. tools/generate_coding_corpus.py writes it from the driver.
+             loops, polylines and polygons, the compressed formats included,
+             and its verdicts on malformed input. The compressed points are
+             the fixtures of s2point_compression_test.cc.
+             tools/generate_coding_corpus.py writes it from the driver.
+
+             tests/ClippingCorpus.roc holds upstream's answers from
+             s2edge_clipping.h for edges drawn the way
+             s2edge_clipping_test.cc draws them, from a fixed seed.
+             tools/generate_clipping_corpus.py writes it from the driver.
+
+             The tables of the inline tests of S2Point.robust_cross and of the
+             circle, circumcenter and Voronoi predicates in S2Predicates are
+             the cases of s2edge_crossings_test.cc and s2predicates_test.cc,
+             with upstream's answers and the answers of its double-precision
+             and exact steps.
 
 s2sphere
   https://github.com/sidewalklabs/s2sphere

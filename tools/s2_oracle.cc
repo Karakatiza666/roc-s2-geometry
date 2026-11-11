@@ -75,6 +75,9 @@
 //   cell_ancestor A B                 GetCommonAncestorLevel (-1 for none)
 //   cell_si_ti ID                     face si ti of GetCenterSiTi
 //   cell_point_raw ID                 ToPointRaw
+//   cell_snap P LEVEL                 S2CellId(P).parent(LEVEL).ToPoint()
+//   cell_geom TOKEN                   S2Cell GetVertex(0..3), GetEdgeRaw(0..3)
+//                                     and GetCenter, as 27 numbers
 //   union_min_max MIN MAX             FromMinMax
 //   union_begin_end BEGIN END         FromBeginEnd
 //   union_verbatim N ID_1 ... ID_N    FromVerbatim, then IsValid IsNormalized
@@ -115,6 +118,40 @@
 //   pred_edge_distance X A0 A1 L      CompareEdgeDistance
 //   pred_edge_pair A0 A1 B0 B1 L      CompareEdgePairDistance
 //   pred_directions A0 A1 B0 B1       CompareEdgeDirections
+//   pred_circle_sign A B N X          CircleEdgeIntersectionSign, then the
+//                                     double-precision triage and the exact
+//                                     result
+//   pred_circle_order A B C D M N     CircleEdgeIntersectionOrdering, then
+//                                     the triage and the exact result
+//   pred_circumcenter X0 X1 A B C     EdgeCircumcenterSign, then the triage
+//                                     and the exact result
+//   pred_voronoi A B X0 X1 L          GetVoronoiSiteExclusion, then the
+//                                     triage and the exact result, each as
+//                                     FIRST, SECOND, NEITHER or UNCERTAIN
+//   robust_cross A B                  the path RobustCrossProd takes (0
+//                                     double, 1 equal inputs, 2 long double,
+//                                     3 exact), the result, and then
+//                                     internal::ExactCrossProd when A != B
+//   exact_cross A B                   internal::ExactCrossProd, for points
+//                                     that need not be unit length
+//   symbolic_cross A B                internal::SymbolicCrossProd
+//
+// Edge clipping. A UV point is two numbers and a UV rectangle R2RECT is
+// X_LO X_HI Y_LO Y_HI, given to the R1Interval constructors.
+//
+//   clip_segments A B                 GetFaceSegments: per segment its face
+//                                     and the two UV points, 5 numbers each
+//   clip_face A B FACE PAD            ClipToPaddedFace: 0, or 1 and the two
+//                                     UV points
+//   clip_rect_hit A B R2RECT          IntersectsRect of the UV points A, B
+//   clip_edge A B R2RECT              ClipEdge: 0, or 1 and the two points
+//   clip_bound A B CLIP BOUND         ClipEdgeBound(A, B, CLIP, &BOUND): 0,
+//                                     or 1 and the bound; then
+//                                     GetClippedEdgeBound(A, B, CLIP)
+//   clip_interp X A B A1 B1           InterpolateDouble
+//   clip_consts                       kFaceClipErrorRadians UVDist UVCoord,
+//                                     kIntersectsRectErrorUVDist,
+//                                     kEdgeClipErrorUVCoord UVDist
 //
 // Padded cells, cell distances, rectangles and the rectangle bounder (a
 // rectangle RECT is LAT_LO LAT_HI LNG_LO LNG_HI in radians, passed to the
@@ -196,6 +233,11 @@
 //   code_enc line_compact CHAIN | poly_compact POLY
 //                                     EncodeMostCompact, and Encode with
 //                                     CodingHint::COMPACT
+//   code_enc points LEVEL CHAIN       S2EncodePointsCompressed of the
+//                                     XYZtoFaceSiTi form of each point
+//   code_dec points LEVEL N HEX       S2DecodePointsCompressed of N points:
+//                                     "ok", the bytes read and the points,
+//                                     or "err"
 //   code_dec KIND HEX                 "ok" and the hex of the decoded value
 //                                     encoded again, or "err". KIND is as
 //                                     above, plus varint32 and varint64
@@ -298,6 +340,7 @@
 #include "s2/s2earth.h"
 #include "s2/s2edge_crosser.h"
 #include "s2/s2edge_crossings.h"
+#include "s2/s2edge_clipping.h"
 #include "s2/s2edge_crossings_internal.h"
 #include "s2/s2edge_distances.h"
 #include "s2/s2cell.h"
@@ -308,7 +351,9 @@
 #include "s2/s2loop.h"
 #include "s2/s2loop_measures.h"
 #include "s2/s2padded_cell.h"
+#include "s2/s2point_compression.h"
 #include "s2/s2predicates.h"
+#include "s2/s2predicates_internal.h"
 #include "s2/s2measures.h"
 #include "s2/s2metrics.h"
 #include "s2/s2point.h"
@@ -1334,6 +1379,128 @@ int Answer(const std::string& kind, std::istringstream& in) {
     std::printf("%d\n", s2pred::CompareEdgePairDistance(
                             a0, a1, b0, b1,
                             S1ChordAngle::FromLength2(Number(in))));
+  } else if (kind == "pred_circle_sign") {
+    S2Point a = Point(in), b = Point(in), n = Point(in), x = Point(in);
+    std::printf("%d %d %d\n", s2pred::CircleEdgeIntersectionSign(a, b, n, x),
+                s2pred::TriageCircleEdgeIntersectionSign(a, b, n, x),
+                s2pred::ExactCircleEdgeIntersectionSign(
+                    s2pred::ToExact(a), s2pred::ToExact(b), s2pred::ToExact(n),
+                    s2pred::ToExact(x)));
+  } else if (kind == "pred_circle_order") {
+    S2Point a = Point(in), b = Point(in), c = Point(in), d = Point(in);
+    S2Point m = Point(in), n = Point(in);
+    std::printf(
+        "%d %d %d\n", s2pred::CircleEdgeIntersectionOrdering(a, b, c, d, m, n),
+        s2pred::TriageIntersectionOrdering(a, b, c, d, m, n),
+        s2pred::ExactIntersectionOrdering(
+            s2pred::ToExact(a), s2pred::ToExact(b), s2pred::ToExact(c),
+            s2pred::ToExact(d), s2pred::ToExact(m), s2pred::ToExact(n)));
+  } else if (kind == "pred_circumcenter") {
+    S2Point x0 = Point(in), x1 = Point(in);
+    S2Point a = Point(in), b = Point(in), c = Point(in);
+    int abc = s2pred::Sign(a, b, c);
+    std::printf("%d %d %d\n", s2pred::EdgeCircumcenterSign(x0, x1, a, b, c),
+                s2pred::TriageEdgeCircumcenterSign(x0, x1, a, b, c, abc),
+                s2pred::ExactEdgeCircumcenterSign(
+                    s2pred::ToExact(x0), s2pred::ToExact(x1),
+                    s2pred::ToExact(a), s2pred::ToExact(b),
+                    s2pred::ToExact(c), abc));
+  } else if (kind == "pred_voronoi") {
+    S2Point a = Point(in), b = Point(in), x0 = Point(in), x1 = Point(in);
+    S1ChordAngle r = S1ChordAngle::FromLength2(Number(in));
+    std::ostringstream os;
+    os << s2pred::GetVoronoiSiteExclusion(a, b, x0, x1, r) << " "
+       << s2pred::TriageVoronoiSiteExclusion(a, b, x0, x1, r.length2())
+       << " "
+       << s2pred::ExactVoronoiSiteExclusion(
+              s2pred::ToExact(a), s2pred::ToExact(b), s2pred::ToExact(x0),
+              s2pred::ToExact(x1), exactfloat::ExactFloat(r.length2()));
+    std::printf("%s\n", os.str().c_str());
+  } else if (kind == "robust_cross") {
+    S2Point a = Point(in), b = Point(in);
+    S2Point stable;
+    s2pred::Vector3_ld stable_ld;
+    int path = S2::internal::GetStableCrossProd(a, b, &stable) ? 0
+               : a == b                                        ? 1
+               : S2::internal::GetStableCrossProd(s2pred::ToLD(a),
+                                                  s2pred::ToLD(b), &stable_ld)
+                   ? 2
+                   : 3;
+    S2Point r = S2::RobustCrossProd(a, b);
+    std::printf("%d %.17g %.17g %.17g", path, r.x(), r.y(), r.z());
+    if (a != b) {
+      S2Point e = S2::internal::ExactCrossProd(a, b);
+      std::printf(" %.17g %.17g %.17g", e.x(), e.y(), e.z());
+    }
+    std::printf("\n");
+  } else if (kind == "exact_cross") {
+    S2Point a = Point(in), b = Point(in);
+    PrintPoint(S2::internal::ExactCrossProd(a, b));
+  } else if (kind == "symbolic_cross") {
+    S2Point a = Point(in), b = Point(in);
+    PrintPoint(S2::internal::SymbolicCrossProd(a, b));
+  } else if (kind == "clip_segments") {
+    S2Point a = Point(in), b = Point(in);
+    S2::FaceSegmentVector segments;
+    S2::GetFaceSegments(a, b, &segments);
+    const char* separator = "";
+    for (const auto& s : segments) {
+      std::printf("%s%d %.17g %.17g %.17g %.17g", separator, s.face, s.a.x(),
+                  s.a.y(), s.b.x(), s.b.y());
+      separator = " ";
+    }
+    std::printf("\n");
+  } else if (kind == "clip_face") {
+    S2Point a = Point(in), b = Point(in);
+    int face;
+    in >> face;
+    double padding = Number(in);
+    R2Point a_uv, b_uv;
+    if (S2::ClipToPaddedFace(a, b, face, padding, &a_uv, &b_uv)) {
+      std::printf("1 %.17g %.17g %.17g %.17g\n", a_uv.x(), a_uv.y(), b_uv.x(),
+                  b_uv.y());
+    } else {
+      std::printf("0\n");
+    }
+  } else if (kind == "clip_rect_hit" || kind == "clip_edge" ||
+             kind == "clip_bound") {
+    double ax = Number(in), ay = Number(in), bx = Number(in), by = Number(in);
+    R2Point a(ax, ay), b(bx, by);
+    auto read_rect = [&]() {
+      double x0 = Number(in), x1 = Number(in), y0 = Number(in), y1 = Number(in);
+      return R2Rect(R1Interval(x0, x1), R1Interval(y0, y1));
+    };
+    R2Rect clip = read_rect();
+    if (kind == "clip_rect_hit") {
+      std::printf("%d\n", S2::IntersectsRect(a, b, clip) ? 1 : 0);
+    } else if (kind == "clip_edge") {
+      R2Point a_clip, b_clip;
+      if (S2::ClipEdge(a, b, clip, &a_clip, &b_clip)) {
+        std::printf("1 %.17g %.17g %.17g %.17g\n", a_clip.x(), a_clip.y(),
+                    b_clip.x(), b_clip.y());
+      } else {
+        std::printf("0\n");
+      }
+    } else {
+      R2Rect bound = read_rect();
+      bool ok = S2::ClipEdgeBound(a, b, clip, &bound);
+      R2Rect got = S2::GetClippedEdgeBound(a, b, clip);
+      if (ok) {
+        std::printf("1 %.17g %.17g %.17g %.17g ", bound[0][0], bound[0][1],
+                    bound[1][0], bound[1][1]);
+      } else {
+        std::printf("0 ");
+      }
+      PrintRect(got);
+    }
+  } else if (kind == "clip_interp") {
+    double x = Number(in), a = Number(in), b = Number(in);
+    double a1 = Number(in), b1 = Number(in);
+    Print({S2::InterpolateDouble(x, a, b, a1, b1)});
+  } else if (kind == "clip_consts") {
+    Print({S2::kFaceClipErrorRadians, S2::kFaceClipErrorUVDist,
+           S2::kFaceClipErrorUVCoord, S2::kIntersectsRectErrorUVDist,
+           S2::kEdgeClipErrorUVCoord, S2::kEdgeClipErrorUVDist});
   } else if (kind == "pred_directions") {
     S2Point a0 = Point(in), a1 = Point(in), b0 = Point(in), b1 = Point(in);
     std::printf("%d\n", s2pred::CompareEdgeDirections(a0, a1, b0, b1));
@@ -1532,6 +1699,17 @@ int Coding(const std::string& op, std::istringstream& in) {
       S2Polyline(Chain(in), S2Debug::DISABLE).EncodeUncompressed(&enc);
     } else if (kind == "poly" || kind == "poly_empty" || kind == "poly_full") {
       ReadPolygon(kind, in)->EncodeUncompressed(&enc);
+    } else if (kind == "points") {
+      int level;
+      in >> level;
+      std::vector<S2XYZFaceSiTi> points;
+      for (const S2Point& p : Chain(in)) {
+        S2XYZFaceSiTi v;
+        v.xyz = p;
+        v.cell_level = S2::XYZtoFaceSiTi(p, &v.face, &v.si, &v.ti);
+        points.push_back(v);
+      }
+      S2EncodePointsCompressed(points, level, &enc);
     } else if (kind == "line_compact") {
       S2Polyline(Chain(in), S2Debug::DISABLE).EncodeMostCompact(&enc);
     } else if (kind == "poly_compact") {
@@ -1555,6 +1733,29 @@ int Coding(const std::string& op, std::istringstream& in) {
       std::printf("ok %llu %zu\n",
                   static_cast<unsigned long long>(kind == "varint32" ? v32 : v),
                   dec.pos());
+    } else {
+      std::printf("err\n");
+    }
+    return 0;
+  } else if (kind == "points") {
+    // The level and count come before the hex.
+    std::istringstream rest(text + " " + [&] {
+      std::string tail;
+      std::getline(in, tail);
+      return tail;
+    }());
+    int level, count;
+    std::string hex;
+    rest >> level >> count >> hex;
+    std::vector<unsigned char> data = FromHex(hex);
+    Decoder points_dec(data.data(), data.size());
+    std::vector<S2Point> points(count);
+    if (S2DecodePointsCompressed(&points_dec, level, absl::MakeSpan(points))) {
+      std::printf("ok %zu", points_dec.pos());
+      for (const S2Point& p : points) {
+        std::printf(" %.17g %.17g %.17g", p.x(), p.y(), p.z());
+      }
+      std::printf("\n");
     } else {
       std::printf("err\n");
     }
@@ -1836,6 +2037,24 @@ int main() {
       int si, ti;
       int face = Id(in).GetCenterSiTi(&si, &ti);
       std::printf("%d %d %d\n", face, si, ti);
+    } else if (kind == "cell_snap") {
+      S2Point p = Point(in);
+      int level;
+      in >> level;
+      PrintPoint(S2CellId(p).parent(level).ToPoint());
+    } else if (kind == "cell_geom") {
+      std::string token;
+      in >> token;
+      S2Cell cell(S2CellId::FromToken(token));
+      const char* separator = "";
+      auto put = [&](const S2Point& p) {
+        std::printf("%s%.17g %.17g %.17g", separator, p.x(), p.y(), p.z());
+        separator = " ";
+      };
+      for (int k = 0; k < 4; ++k) put(cell.GetVertex(k));
+      for (int k = 0; k < 4; ++k) put(cell.GetEdgeRaw(k));
+      put(cell.GetCenter());
+      std::printf("\n");
     } else if (kind == "cell_point_raw") {
       PrintPoint(Id(in).ToPointRaw());
     } else if (kind == "union_min_max") {

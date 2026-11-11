@@ -3,7 +3,6 @@ import S1ChordAngle
 import S2LatLng
 import Internal/S2Crossing
 import Internal/S2Exact
-import Internal/S2Math
 import S2Point
 import S2Predicates
 
@@ -846,6 +845,20 @@ expect S2Edge.point_on_line(S2LatLng.from_degrees(0.0, 0.0).to_point(), S2LatLng
 expect S2Edge.point_on_line_chord(S2LatLng.from_degrees(0.0, 0.0).to_point(), S2LatLng.from_degrees(0.0, 10.0).to_point(), S1ChordAngle.from_radians(0.3)) == S2Point.new(0.9553364891256062, 0.29552020666133955, 0.0)
 expect S2Edge.point_on_line(S2LatLng.from_degrees(10.0, 20.0).to_point(), S2LatLng.from_degrees(10.0, 20.0).to_point(), S1Angle.from_radians(0.1)) == S2Point.new(0.9044725006561222, 0.32929580287571647, 0.27109734370756644)
 expect S2Edge.point_on_line_chord(S2LatLng.from_degrees(10.0, 20.0).to_point(), S2LatLng.from_degrees(10.0, 20.0).to_point(), S1ChordAngle.from_radians(0.1)) == S2Point.new(0.9044725006561222, 0.32929580287571647, 0.27109734370756644)
+# Antipodal endpoints: the direction comes from the symbolic perturbation in
+# S2Point.robust_cross, as upstream's does. Upstream's GetPointOnLine and
+# GetPointToLeft at v0.14.0 through tools/s2_oracle.cc.
+expect S2Edge.point_on_line(S2Point.new(1.0, 0.0, 0.0), S2Point.new(-1.0, 0.0, 0.0), S1Angle.from_radians(0.5))
+	== S2Point.new(0.87758256189037276, 0.0, 0.47942553860420301)
+expect S2Edge.point_on_line_chord(S2Point.new(1.0, 0.0, 0.0), S2Point.new(-1.0, 0.0, 0.0), S1ChordAngle.from_radians(0.5))
+	== S2Point.new(0.87758256189037276, 0.0, 0.47942553860420306)
+expect {
+	a = S2Point.new(0.2672612419124244, 0.53452248382484879, 0.80178372573727319)
+	S2Edge.point_on_line(a, -a, S1Angle.from_radians(1.0))
+		== S2Point.new(-0.15732319321568977, -0.31464638643137954, 0.9360806933069894)
+}
+expect S2Edge.point_to_left(S2Point.new(0.0, 0.0, 1.0), S2Point.new(0.0, 0.0, -1.0), S1Angle.from_radians(0.25))
+	== S2Point.new(-0.24740395925452299, 0.0, 0.96891242171064496)
 expect S2Edge.point_to_left(S2LatLng.from_degrees(0.0, 0.0).to_point(), S2LatLng.from_degrees(0.0, 10.0).to_point(), S1Angle.from_radians(0.2)) == S2Point.new(0.9800665778412416, 0.0, 0.1986693307950612)
 expect S2Edge.point_to_left_chord(S2LatLng.from_degrees(0.0, 0.0).to_point(), S2LatLng.from_degrees(0.0, 10.0).to_point(), S1ChordAngle.from_radians(0.2)) == S2Point.new(0.9800665778412416, 0.0, 0.1986693307950612)
 expect S2Edge.point_to_right(S2LatLng.from_degrees(0.0, 0.0).to_point(), S2LatLng.from_degrees(0.0, 10.0).to_point(), S1Angle.from_radians(0.2)) == S2Point.new(0.9800665778412416, 0.0, -0.1986693307950612)
@@ -1212,7 +1225,7 @@ intersection_exact = |a0, a1, b0, b1| {
 	a_norm_xf = S2Exact.cross(coords(a0), coords(a1))
 	b_norm_xf = S2Exact.cross(coords(b0), coords(b1))
 	x_xf = S2Exact.cross_exact(a_norm_xf, b_norm_xf)
-	if !is_zero_exact(x_xf) {
+	if !S2Exact.is_zero(x_xf) {
 		return exact_to_point(x_xf) * S2Predicates.sign(a0, a1, b1).to_f64()
 	}
 	a_norm = {
@@ -1238,80 +1251,19 @@ intersection_exact = |a0, a1, b0, b1| {
 coords : S2Point -> (F64, F64, F64)
 coords = |p| (p.x(), p.y(), p.z())
 
-## True when every component of an exact vector is zero.
-is_zero_exact : (List(F64), List(F64), List(F64)) -> Bool
-is_zero_exact = |(x, y, z)|
-	S2Exact.sign_of(x) == 0 and S2Exact.sign_of(y) == 0 and S2Exact.sign_of(z) == 0
-
-## An exact vector rounded to doubles, scaled by a power of two when it is so
-## small that normalizing it would lose precision, and then normalized.
+## An exact vector rounded to doubles by upstream's `NormalizableFromExact`,
+## and then normalized.
 exact_to_point : (List(F64), List(F64), List(F64)) -> S2Point
-exact_to_point = |(x, y, z)| {
-	rounded = S2Point.new(S2Exact.to_f64(x), S2Exact.to_f64(y), S2Exact.to_f64(z))
-	if is_normalizable(rounded) {
-		return rounded.normalize()
-	}
-	exponent = [x, y, z]
-		.map(|e| S2Math.frexp_exponent(S2Exact.to_f64(e)))
-		.fold(-2147483647, |acc, e| acc.max(e))
-	scaled = |e| S2Exact.to_f64(S2Exact.scale_by_power_of_two(e, -exponent))
-	S2Point.new(scaled(x), scaled(y), scaled(z)).normalize()
-}
-
-## True when the largest component is at least `2^-242`, which is large
-## enough to normalize without losing precision.
-is_normalizable : S2Point -> Bool
-is_normalizable = |p| p.x().abs().max(p.y().abs()).max(p.z().abs()) >= two_pow_minus_242
-
-## `2^-242`.
-two_pow_minus_242 : F64
-two_pow_minus_242 = S2Math.ldexp(1.0, -242)
-
-## The point scaled by a power of two so that `is_normalizable` holds.
-ensure_normalizable : S2Point -> S2Point
-ensure_normalizable = |p| {
-	if is_normalizable(p) {
-		return p
-	}
-	p_max = p.x().abs().max(p.y().abs()).max(p.z().abs())
-	# ldexp(2, -1 - ilogb(p_max)), where ilogb is one less than the frexp
-	# exponent.
-	scale_by_power_of_two(p, 1 - (S2Math.frexp_exponent(p_max) - 1))
+exact_to_point = |v| {
+	(x, y, z) = S2Exact.normalizable_from_exact(v, 0)
+	S2Point.new(x, y, z).normalize()
 }
 
 ## Upstream's `SymbolicCrossProd`: the direction of `a x b` for exactly
 ## proportional `a` and `b` under the symbolic perturbation that `sign` uses.
 ## Requires `a != b`.
 symbolic_cross : S2Point, S2Point -> S2Point
-symbolic_cross = |a, b|
-	if a < b {
-		ensure_normalizable(symbolic_cross_sorted(a, b))
-	} else {
-		-ensure_normalizable(symbolic_cross_sorted(b, a))
-	}
-
-## `symbolic_cross` for `a < b`.
-symbolic_cross_sorted : S2Point, S2Point -> S2Point
-symbolic_cross_sorted = |a, b|
-	if b.x() != 0.0 or b.y() != 0.0 {
-		S2Point.new(-b.y(), b.x(), 0.0)
-	} else if b.z() != 0.0 {
-		S2Point.new(b.z(), 0.0, 0.0)
-	} else if a.x() != 0.0 or a.y() != 0.0 {
-		S2Point.new(a.y(), -a.x(), 0.0)
-	} else {
-		S2Point.new(1.0, 0.0, 0.0)
-	}
-
-## The point multiplied by `2^n`, in steps that cannot overflow the factor.
-scale_by_power_of_two : S2Point, I32 -> S2Point
-scale_by_power_of_two = |p, n| {
-	var $out = p
-	var $left = n
-	while $left != 0 {
-		step = $left.max(-600).min(600)
-		$out = $out * S2Math.ldexp(1.0, step)
-		$left = $left - step
-	}
-	$out
+symbolic_cross = |a, b| {
+	(x, y, z) = S2Exact.symbolic_cross(coords(a), coords(b))
+	S2Point.new(x, y, z)
 }

@@ -10,6 +10,7 @@ import S2Loop
 import Internal/S2Boundary
 import S2Point
 import Internal/S2Coder
+import S2PointCompression
 
 ## A region bounded by loops, holes included.
 ##
@@ -580,15 +581,48 @@ S2Polygon := { loops : List(Nested), bound : S2LatLngRect, inconsistent_orientat
 	to_inspect : S2Polygon -> Str
 	to_inspect = |polygon| "S2Polygon(${polygon.loops.len().to_str()} loops)"
 
+	## The bytes that upstream's `S2Polygon::Encode` writes with its default
+	## hint, `CodingHint::COMPACT`: the compressed format when it is smaller,
+	## and `encode_uncompressed` otherwise.
+	##
+	## The compressed format is the version byte 4, the snap level, the
+	## number of loops as a varint, and then each loop: its number of
+	## vertices as a varint, the vertices in the format of
+	## `S2PointCompression.encode_points_compressed`, a varint of flags (1
+	## for `origin_inside`, 2 when the bound follows), the depth as a varint,
+	## and, for a loop of 64 vertices or more, its bound in the format of
+	## `S2LatLngRect.encode`.
+	##
+	## The snap level is the level whose cell centres most of the vertices
+	## are, the lowest such level on a tie. The compressed format is chosen
+	## when about 4 bytes for each vertex, plus 26 for each vertex that is not
+	## such a centre, is less than the 24 bytes for each vertex of the
+	## lossless format. A polygon with no vertex is always compressed. Both
+	## formats are lossless.
+	encode : S2Polygon -> List(U8)
+	encode = |polygon| {
+		all = polygon.loops.join_map(|entry| entry.boundary.vertices().map(S2PointCompression.xyz_face_si_ti))
+		level =
+			if all.is_empty() {
+				30
+			} else {
+				match compact_snap_level(all) {
+					Ok(l) => l
+					Err(Lossless) => return polygon.encode_uncompressed()
+				}
+			}
+		header = [4, level.to_u8_wrap()] |> S2Coder.put_varint32(polygon.loops.len())
+		polygon.loops.fold(header, |out, entry| out.concat(encode_loop_compressed(entry, level)))
+	}
+
 	## The bytes that upstream's `S2Polygon::EncodeUncompressed` writes: the
 	## version byte 1, the byte 1 that stands for the obsolete `owns_loops`
 	## field, a byte that tells whether any loop is a hole, the number of loops
 	## as a little-endian 32-bit integer, each loop in the format of
 	## `S2Loop.encode` with its own depth, and the bounding rectangle in the
-	## format of `S2LatLngRect.encode`. This is the lossless format. The
-	## compressed formats are not written.
-	encode : S2Polygon -> List(U8)
-	encode = |polygon| {
+	## format of `S2LatLngRect.encode`. This is the lossless format.
+	encode_uncompressed : S2Polygon -> List(U8)
+	encode_uncompressed = |polygon| {
 		has_holes = polygon.loops.any(|entry| entry.depth % 2 == 1)
 		header =
 			[1, 1, if (has_holes) 1 else 0]
@@ -597,23 +631,27 @@ S2Polygon := { loops : List(Nested), bound : S2LatLngRect, inconsistent_orientat
 			|> List.concat(polygon.bound.encode())
 	}
 
-	## The polygon that `encode` writes. Bytes after the polygon are ignored.
+	## The polygon that `encode` or `encode_uncompressed` writes. Bytes after
+	## the polygon are ignored.
 	##
-	## Upstream's `Decode` trusts the stored depths and bound without a check,
-	## and so does this function. A loop with no vertex, and an empty loop,
-	## are dropped, as upstream drops them. The two obsolete bytes are ignored.
+	## Upstream's `Decode` trusts the stored depths, flags and bounds without
+	## a check, and so does this function. A loop with no vertex, and an
+	## empty loop, are dropped, as upstream drops them. The two obsolete bytes
+	## are ignored. In the compressed format a loop without a stored bound
+	## gets the bound of its vertices, and the polygon gets the union of the
+	## bounds of its loops at depth 0, as upstream computes them.
 	##
-	## The version byte 4 is upstream's compressed format, which this port
-	## does not read: that is `UnsupportedCompressedEncoding`. Any other
-	## version byte than 1 is `UnsupportedVersion`. More than 10000000 loops is
-	## `TooManyLoops`, which is the default limit of upstream's flag
-	## `s2polygon_decode_max_num_loops`. A loop can give any error of
-	## `S2Loop.decode`.
-	decode : List(U8) -> Try(S2Polygon, [Truncated, UnsupportedVersion(U8), UnsupportedCompressedEncoding, TooManyLoops, TooManyVertices, InvalidRect])
+	## A version byte other than 1 or 4 is `UnsupportedVersion`. More than
+	## 10000000 loops is `TooManyLoops`, which is the default limit of
+	## upstream's flag `s2polygon_decode_max_num_loops`. A loop can give any
+	## error of `S2Loop.decode`. In the compressed format a snap level above
+	## 30 and a loop with no vertex are `InvalidEncoding`, and the points can
+	## give any error of `S2PointCompression.decode_points_compressed`.
+	decode : List(U8) -> Try(S2Polygon, [Truncated, UnsupportedVersion(U8), TooManyLoops, TooManyVertices, InvalidRect, BadVarint, InvalidEncoding])
 	decode = |bytes| {
 		version = S2Coder.get_u8(bytes, 0)?
 		if version == 4 {
-			return Err(UnsupportedCompressedEncoding)
+			return decode_compressed(bytes)
 		}
 		if version != 1 {
 			return Err(UnsupportedVersion(version))
@@ -639,6 +677,91 @@ S2Polygon := { loops : List(Nested), bound : S2LatLngRect, inconsistent_orientat
 		}
 		bound = S2LatLngRect.decode(bytes.drop_first($pos))?
 		Ok({ loops: $loops, bound: bound, inconsistent_orientations: Bool.False })
+	}
+}
+
+## The compressed format of `encode`, after the version byte.
+decode_compressed : List(U8) -> Try(S2Polygon, [Truncated, UnsupportedVersion(U8), TooManyLoops, TooManyVertices, InvalidRect, BadVarint, InvalidEncoding])
+decode_compressed = |bytes| {
+	snap_level = S2Coder.get_u8(bytes, 1)?
+	if snap_level > 30 {
+		return Err(InvalidEncoding)
+	}
+	(count, start) = S2Coder.get_varint32(bytes, 2)?
+	if count > 10000000 {
+		return Err(TooManyLoops)
+	}
+	var $loops = []
+	var $pos = start
+	for _ in 0..<count {
+		(num_vertices, after_count) = S2Coder.get_varint32(bytes, $pos)?
+		if num_vertices == 0 {
+			return Err(InvalidEncoding)
+		}
+		if num_vertices > 50000000 {
+			return Err(TooManyVertices)
+		}
+		decoded = S2PointCompression.decode_points_compressed(bytes.drop_first(after_count), num_vertices, snap_level.to_u64())?
+		(properties, after_properties) = S2Coder.get_varint32(bytes, after_count + decoded.size)?
+		(depth, after_depth) = S2Coder.get_varint32(bytes, after_properties)?
+		origin_inside = properties.bitwise_and(1) != 0
+		(bound, next) =
+			if properties.bitwise_and(2) != 0 {
+				(S2LatLngRect.decode(bytes.drop_first(after_depth))?, after_depth + 33)
+			} else {
+				(S2Boundary.compute_bound(decoded.points, origin_inside), after_depth)
+			}
+		$pos = next
+		boundary : S2Loop
+		boundary = { vertices: decoded.points, origin_inside: origin_inside, bound: bound }
+		if !boundary.is_empty() {
+			$loops = $loops.append({ boundary: boundary, depth: depth })
+		}
+	}
+	Ok(assemble($loops, Bool.False))
+}
+
+## The encoding of a loop in the compressed format of `encode`, at the given
+## snap level.
+encode_loop_compressed : S2Polygon.Nested, U64 -> List(U8)
+encode_loop_compressed = |entry, level| {
+	boundary = entry.boundary
+	n = boundary.num_vertices()
+	# Loops of 64 vertices or more carry their bound, which is costly to
+	# compute again.
+	with_bound = n >= 64
+	properties = (if (boundary.origin_inside) 1 else 0) + (if (with_bound) 2 else 0)
+	out =
+		[]
+			|> S2Coder.put_varint32(n)
+			|> List.concat(S2PointCompression.encode_points_compressed(boundary.vertices().map(S2PointCompression.xyz_face_si_ti), level))
+			|> S2Coder.put_varint32(properties)
+			|> S2Coder.put_varint32(entry.depth)
+	if with_bound {
+		out.concat(boundary.rect_bound().encode())
+	} else {
+		out
+	}
+}
+
+## Upstream's choice of format in `Encode`: the level whose cell centres most
+## of the points are, the lowest on a tie, when the compressed format is
+## estimated to be smaller, and `Err(Lossless)` otherwise.
+compact_snap_level : List(S2PointCompression.S2XYZFaceSiTi) -> Try(U64, [Lossless])
+compact_snap_level = |all| {
+	histogram = all.fold(
+		List.repeat(0.U64, 31),
+		|counts, v| match v.cell_level {
+			Ok(level) => counts.update(level, |c| c + 1) ?? counts
+			Err(_) => counts
+		},
+	)
+	(level, snapped) = histogram.fold_with_index((0, 0), |(best, best_count), count, i| if (count > best_count) (i, count) else (best, best_count))
+	n = all.len()
+	if 4 * n + 26 * (n - snapped) < 24 * n {
+		Ok(level)
+	} else {
+		Err(Lossless)
 	}
 }
 
@@ -1299,17 +1422,34 @@ expect {
 		and polygon.is_normalized()
 }
 
-# S2Polygon encoding against upstream's `Encode`, and decoding it back.
-expect S2Coder.to_hex(S2Polygon.empty().encode()) == "0101000000000001000000000000f03f0000000000000000182d4454fb210940182d4454fb2109c0"
+# S2Polygon encoding against upstream's `EncodeUncompressed`, and decoding it
+# back.
+expect S2Coder.to_hex(S2Polygon.empty().encode_uncompressed()) == "0101000000000001000000000000f03f0000000000000000182d4454fb210940182d4454fb2109c0"
 expect S2Polygon.decode(S2Coder.from_hex("0101000000000001000000000000f03f0000000000000000182d4454fb210940182d4454fb2109c0")) == Ok(S2Polygon.empty())
-expect S2Coder.to_hex(S2Polygon.full().encode()) == "01010001000000010100000000000000000000000000000000000000000000000000f0bf010000000001182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb21094001182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb210940"
+expect S2Coder.to_hex(S2Polygon.full().encode_uncompressed()) == "01010001000000010100000000000000000000000000000000000000000000000000f0bf010000000001182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb21094001182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb210940"
 expect S2Polygon.decode(S2Coder.from_hex("01010001000000010100000000000000000000000000000000000000000000000000f0bf010000000001182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb21094001182d4454fb21f9bf182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) == Ok(S2Polygon.full())
-expect S2Coder.to_hex(S2Polygon.from_loop(S2Loop.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)])).encode()) == "010100010000000103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb21094001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940"
+expect S2Coder.to_hex(S2Polygon.from_loop(S2Loop.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)])).encode_uncompressed()) == "010100010000000103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb21094001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940"
 expect S2Polygon.decode(S2Coder.from_hex("010100010000000103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb21094001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) == Ok(S2Polygon.from_loop(S2Loop.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)])))
 
-# The compressed format is not read, and any other version is not known.
-expect S2Polygon.decode(S2Coder.from_hex("04000104180000000301171c818c8b83ef3f89730b7e1a3ac63f0000000000000000028d162921fb08ef3ff40b8a74a8e3c53f89730b7e1a3ac63f03171c818c8b83ef3f000000000000000089730b7e1a3ac63f0000")) == Err(UnsupportedCompressedEncoding)
-expect S2Polygon.decode(S2Coder.from_hex("04")) == Err(UnsupportedCompressedEncoding)
+# Upstream's `Encode` with its default hint. The empty polygon is always
+# compressed, and the vertices of the full polygon and of the triangle are
+# centres of cells at level 0.
+expect S2Coder.to_hex(S2Polygon.empty().encode()) == "041e00"
+expect S2Polygon.decode(S2Coder.from_hex("041e00")) == Ok(S2Polygon.empty())
+expect S2Coder.to_hex(S2Polygon.full().encode()) == "040001010b000100"
+expect S2Polygon.decode(S2Coder.from_hex("040001010b000100")) == Ok(S2Polygon.full())
+expect S2Coder.to_hex(S2Polygon.from_loop(S2Loop.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)])).encode()) == "040001030607080000000000"
+expect S2Polygon.decode(S2Coder.from_hex("040001030607080000000000")) == Ok(S2Polygon.from_loop(S2Loop.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)])))
+expect
+	S2Polygon.decode(S2Coder.from_hex("040001030607080000000000")).map_ok(|p| S2Coder.to_hex(p.encode_uncompressed()))
+		== Ok("010100010000000103000000000000000000f03f000000000000000000000000000000000000000000000080000000000000f03f000000000000000000000000000000800000000000000080000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb21094001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940")
+# A compressed loop of four cell centres at level 10, decoded as upstream
+# decodes it.
+expect
+	S2Polygon.decode(S2Coder.from_hex("04000104180000000301171c818c8b83ef3f89730b7e1a3ac63f0000000000000000028d162921fb08ef3ff40b8a74a8e3c53f89730b7e1a3ac63f03171c818c8b83ef3f000000000000000089730b7e1a3ac63f0000")).map_ok(|p| S2Coder.to_hex(p.encode_uncompressed()))
+		== Ok("010100010000000104000000000000000000f03f00000000000000000000000000000000171c818c8b83ef3f89730b7e1a3ac63f00000000000000008d162921fb08ef3ff40b8a74a8e3c53f89730b7e1a3ac63f171c818c8b83ef3f000000000000000089730b7e1a3ac63f000000000001193c52217c17cabca2cb5f5b7f6cc63f00000000000000008744e74a1857c63f01193c52217c17cabca2cb5f5b7f6cc63f00000000000000008744e74a1857c63f")
+expect S2Polygon.decode(S2Coder.from_hex("04")) == Err(Truncated)
+# Any other version is not known.
 expect S2Polygon.decode(S2Coder.from_hex("020100010000000103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb21094001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) == Err(UnsupportedVersion(2))
 expect S2Polygon.decode(S2Coder.from_hex("000100010000000103000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f000000000001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb21094001000000000000d4bc182d4454fb21f93f182d4454fb2109c0182d4454fb210940")) == Err(UnsupportedVersion(0))
 expect S2Polygon.decode([]) == Err(Truncated)

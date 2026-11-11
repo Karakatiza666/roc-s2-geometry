@@ -9,6 +9,7 @@ import s2.S2LatLng
 import s2.S2LatLngRect
 import s2.S2Loop
 import s2.S2Point
+import s2.S2PointCompression
 import s2.S2PointRegion
 import s2.S2Polygon
 import s2.S2Polyline
@@ -112,18 +113,60 @@ S2CodingTest := [].{
 		"pointregion" => S2PointRegion.decode(bytes).map_ok(|v| S2CodingTest.hex_of(v.encode())).map_err(Str.inspect)
 		"loop" => S2Loop.decode(bytes).map_ok(|v| S2CodingTest.hex_of(v.encode())).map_err(Str.inspect)
 		"line" => S2Polyline.decode(bytes).map_ok(|v| S2CodingTest.hex_of(v.encode())).map_err(Str.inspect)
-		"poly" => S2Polygon.decode(bytes).map_ok(|v| S2CodingTest.hex_of(v.encode())).map_err(Str.inspect)
+		"poly" => S2Polygon.decode(bytes).map_ok(|v| S2CodingTest.hex_of(v.encode_uncompressed())).map_err(Str.inspect)
 		_ => Err("unknown kind")
 	}
+
+	## True when the rectangles are within 1e-14 of each other.
+	rect_is_close : S2LatLngRect, S2LatLngRect -> Bool
+	rect_is_close = |a, b| {
+		close = |x, y| (x - y).abs() < 1e-14
+		close(a.lat().lo(), b.lat().lo())
+			and close(a.lat().hi(), b.lat().hi())
+			and close(a.lng().lo(), b.lng().lo())
+			and close(a.lng().hi(), b.lng().hi())
+	}
+
+	## True when the two loops of polygons have the same depth, vertices and
+	## `origin_inside`, and bounds within 1e-14.
+	loops_match : S2Polygon.Nested, S2Polygon.Nested -> Bool
+	loops_match = |a, b|
+		a.depth == b.depth
+			and a.boundary.vertices() == b.boundary.vertices()
+			and a.boundary.origin_inside == b.boundary.origin_inside
+			and S2CodingTest.rect_is_close(a.boundary.rect_bound(), b.boundary.rect_bound())
+
+	## True when the compressed polygon decodes to the polygon whose lossless
+	## encoding upstream gave: the same loops, vertices, depths and
+	## `origin_inside`, and bounds within 1e-14.
+	##
+	## The compressed format stores no bound for a loop of fewer than 64
+	## vertices, nor for the polygon, so both sides compute them. The port's
+	## `atan2` is not the C library's, so a computed bound can differ from
+	## upstream's in the last digit.
+	compressed_polygon_matches : List(U8), Str -> Bool
+	compressed_polygon_matches = |bytes, lossless|
+		match (S2Polygon.decode(bytes), S2Polygon.decode(S2CodingTest.bytes_of(lossless))) {
+			(Ok(got), Ok(expected)) => {
+				got_loops = got.loops()
+				expected_loops = expected.loops()
+				got_loops.len() == expected_loops.len()
+					and S2CodingTest.rect_is_close(got.rect_bound(), expected.rect_bound())
+					and List.map2(got_loops, expected_loops, S2CodingTest.loops_match).all(|ok| ok)
+			}
+			_ => Bool.False
+		}
 
 	## True when `decode` and `encode` agree with upstream's verdict.
 	verdict_holds : { kind : Str, name : Str, hex : Str, verdict : Str } -> Bool
 	verdict_holds = |case| match S2CodingTest.decoded(case.kind, S2CodingTest.bytes_of(case.hex)) {
-		Ok(hex) => hex == case.verdict
+		Ok(hex) => if case.kind == "poly" and case.hex.starts_with("04") {
+			S2CodingTest.compressed_polygon_matches(S2CodingTest.bytes_of(case.hex), case.verdict)
+		} else {
+			hex == case.verdict
+		}
 		Err(error) => if case.verdict == "-" {
 			Bool.True
-		} else if case.verdict == "compressed" {
-			error == "UnsupportedCompressedEncoding"
 		} else if case.verdict == "invalid" {
 			error == "InvalidCellId"
 		} else {
@@ -245,7 +288,7 @@ expect S2CodingTest.failures(
 	|c| S2CodingTest.round_trips(
 		c.hex,
 		S2Polygon.from_loops(c.loops.map(|l| S2CodingTest.loop_of(l.vertices, l.bound))),
-		S2Polygon.encode,
+		S2Polygon.encode_uncompressed,
 		S2Polygon.decode,
 	),
 )
@@ -262,3 +305,62 @@ expect S2CodingTest.failures(CodingCorpus.verdicts, S2CodingTest.verdict_holds) 
 
 # Every truncation is refused, and none crashes.
 expect S2CodingTest.failures(CodingCorpus.truncation_samples, S2CodingTest.truncations_refused) == 0
+
+# Compressed points: the bytes of upstream's S2EncodePointsCompressed, and
+# S2DecodePointsCompressed of them, for the fixtures of its tests.
+expect S2CodingTest.failures(
+	CodingCorpus.compressed_points,
+	|c| {
+		points = c.points.map(S2CodingTest.point_of)
+		encoded = S2PointCompression.encode_points_compressed(points.map(S2PointCompression.xyz_face_si_ti), c.level)
+		decoded = S2PointCompression.decode_points_compressed(S2CodingTest.bytes_of(c.hex), points.len(), c.level)
+		S2CodingTest.hex_of(encoded) == c.hex
+			and decoded == Ok({ points: points, size: encoded.len() })
+	},
+)
+	== 0
+
+# Polylines in the most compact format, and back.
+expect S2CodingTest.failures(
+	CodingCorpus.compact_lines,
+	|c| S2CodingTest.round_trips(
+		c.hex,
+		S2Polyline.from_points(c.vertices.map(S2CodingTest.point_of)),
+		S2Polyline.encode_most_compact,
+		S2Polyline.decode,
+	),
+)
+	== 0
+
+# Polygons in the default format, and back. A loop built here carries
+# upstream's bound, which the compressed format stores for loops of 64
+# vertices or more. Decoding computes the bounds of the other loops, as
+# upstream does, and must give the same polygon as upstream. Decoding the
+# compressed bytes must also give what upstream's decoding gives.
+expect S2CodingTest.failures(
+	CodingCorpus.compact_polygons,
+	|c| S2CodingTest.round_trips(
+		c.hex,
+		S2Polygon.from_loops(c.loops.map(|l| S2CodingTest.loop_of(l.vertices, l.bound))),
+		S2Polygon.encode,
+		S2Polygon.decode,
+	),
+)
+	== 0
+expect S2CodingTest.failures(
+	CodingCorpus.compact_polygons,
+	|c| S2CodingTest.compressed_polygon_matches(S2CodingTest.bytes_of(c.hex), c.decoded),
+)
+	== 0
+
+# Every truncation of compressed points is refused.
+expect {
+	bytes = S2CodingTest.bytes_of(CodingCorpus.point_truncation_sample)
+	var $refused = Bool.True
+	for n in 0..<bytes.len() {
+		if S2PointCompression.decode_points_compressed(bytes.sublist({ start: 0, len: n }), 4, 30).is_ok() {
+			$refused = Bool.False
+		}
+	}
+	$refused
+}

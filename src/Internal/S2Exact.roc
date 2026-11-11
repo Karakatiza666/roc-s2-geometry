@@ -264,6 +264,197 @@ S2Exact := [].{
 		}
 		$out
 	}
+
+	## True when every component of a vector of expansions is zero.
+	is_zero : (List(F64), List(F64), List(F64)) -> Bool
+	is_zero = |(x, y, z)|
+		S2Exact.sign_of(x) == 0 and S2Exact.sign_of(y) == 0 and S2Exact.sign_of(z) == 0
+
+	## The exponent `e` of the exact value `v` of a non-zero expansion, for
+	## which `2^(e - 1) <= |v| < 2^e`. This is the exponent `frexp` gives, and
+	## upstream's `ExactFloat::exp`.
+	##
+	## The largest component gives a first guess. The smaller components can
+	## carry the value across a power of two, so exact comparisons correct it.
+	exponent : List(F64) -> I32
+	exponent = |expansion| {
+		magnitude = if (S2Exact.sign_of(expansion) < 0) S2Exact.negate(expansion) else expansion
+		top = magnitude.fold(0.0, |acc, t| if (t.abs() > acc) t.abs() else acc)
+		var $e = frexp_exponent(top)
+		var $steps = 0.U64
+		while $steps < 4 {
+			$steps = $steps + 1
+			if $e > -1073 and S2Exact.sign_of(S2Exact.grow(magnitude, -pow2($e - 1))) < 0 {
+				$e = $e - 1
+			} else if $e < 1024 and S2Exact.sign_of(S2Exact.grow(magnitude, -pow2($e))) >= 0 {
+				$e = $e + 1
+			} else {
+				break
+			}
+		}
+		$e
+	}
+
+	## Upstream's `NormalizableFromExact` for the vector `v * 2^-shift`, where
+	## `v` is the given vector of expansions.
+	##
+	## The vector is rounded to doubles. When its largest component is then
+	## below `2^-242`, too small to normalize without a loss of precision, it
+	## is first scaled by a power of two so that its largest component is in
+	## `[0.5, 1)`. The zero vector gives zero. The result is not normalized.
+	##
+	## The `shift` lets a caller scale its inputs up to keep the products of
+	## small coordinates exact, and take the scale out here.
+	normalizable_from_exact : (List(F64), List(F64), List(F64)), I32 -> (F64, F64, F64)
+	normalizable_from_exact = |(x, y, z), shift| {
+		round = |e| S2Exact.to_f64(S2Exact.scale_by_power_of_two(e, -shift))
+		rounded = (round(x), round(y), round(z))
+		if is_normalizable(rounded) {
+			return rounded
+		}
+		exponents = [x, y, z].keep_if(|e| S2Exact.sign_of(e) != 0).map(S2Exact.exponent)
+		match exponents.max() {
+			Ok(e) => {
+				scaled = |c| S2Exact.to_f64(S2Exact.scale_by_power_of_two(c, -e))
+				(scaled(x), scaled(y), scaled(z))
+			}
+			Err(_) => (0.0, 0.0, 0.0)
+		}
+	}
+
+	## Upstream's `EnsureNormalizable`: the vector itself when its largest
+	## component is at least `2^-242`, and otherwise the vector scaled by a
+	## power of two so that its largest component is in `[1, 2)`.
+	##
+	## Requires a non-zero vector. Upstream multiplies by one power of two,
+	## which overflows for a subnormal component; this port scales in steps.
+	ensure_normalizable : (F64, F64, F64) -> (F64, F64, F64)
+	ensure_normalizable = |(x, y, z)| {
+		if is_normalizable((x, y, z)) {
+			return (x, y, z)
+		}
+		p_max = x.abs().max(y.abs()).max(z.abs())
+		# ldexp(2, -1 - ilogb(p_max)) is 2^(1 - e) for the frexp exponent e.
+		n = 1 - frexp_exponent(p_max)
+		(scale_f64(x, n), scale_f64(y, n), scale_f64(z, n))
+	}
+
+	## Upstream's `SymbolicCrossProd`: the direction of `a x b` for exactly
+	## proportional `a` and `b` under the symbolic perturbation that
+	## `S2Predicates.sign` uses, scaled by `ensure_normalizable`. Requires
+	## `a != b`.
+	symbolic_cross : (F64, F64, F64), (F64, F64, F64) -> (F64, F64, F64)
+	symbolic_cross = |a, b|
+		if lexicographic_less(a, b) {
+			S2Exact.ensure_normalizable(symbolic_cross_sorted(a, b))
+		} else {
+			(x, y, z) = S2Exact.ensure_normalizable(symbolic_cross_sorted(b, a))
+			(-x, -y, -z)
+		}
+
+	## Upstream's `ExactCrossProd`: the cross product of `a` and `b` in exact
+	## arithmetic, rounded by `normalizable_from_exact`, and the symbolic
+	## cross product `symbolic_cross` when the exact one is zero. Requires
+	## `a != b`.
+	##
+	## Each input is first scaled by a power of two that puts its largest
+	## coordinate near `2^256`. The cross product is linear in each input,
+	## so this changes only its scale, which `normalizable_from_exact` takes
+	## out again. It keeps the error terms of the products exact when a
+	## coordinate is tiny or subnormal, where they would otherwise underflow.
+	exact_cross_prod : (F64, F64, F64), (F64, F64, F64) -> (F64, F64, F64)
+	exact_cross_prod = |a, b| {
+		a_shift = 256 - frexp_exponent(largest_abs(a))
+		b_shift = 256 - frexp_exponent(largest_abs(b))
+		product = S2Exact.cross(scale3(a, a_shift), scale3(b, b_shift))
+		if S2Exact.is_zero(product) {
+			S2Exact.symbolic_cross(a, b)
+		} else {
+			S2Exact.normalizable_from_exact(product, a_shift + b_shift)
+		}
+	}
+}
+
+## True when the largest component of the vector is at least `2^-242`, which
+## is large enough to normalize, and to measure the angle to another such
+## vector, without a loss of precision to underflow.
+is_normalizable : (F64, F64, F64) -> Bool
+is_normalizable = |v| largest_abs(v) >= pow2(-242)
+
+## The largest magnitude among the three components.
+largest_abs : (F64, F64, F64) -> F64
+largest_abs = |(x, y, z)| x.abs().max(y.abs()).max(z.abs())
+
+## The lexicographic order on `(x, y, z)` that the symbolic perturbations are
+## defined against.
+lexicographic_less : (F64, F64, F64), (F64, F64, F64) -> Bool
+lexicographic_less = |(ax, ay, az), (bx, by, bz)|
+	if ax != bx {
+		ax < bx
+	} else if ay != by {
+		ay < by
+	} else {
+		az < bz
+	}
+
+## `symbolic_cross` for `a < b`, before scaling. The tests enumerate the
+## coefficients of the perturbations in decreasing order of size, and the
+## first non-zero one decides. The last two cases need `b` to be zero.
+symbolic_cross_sorted : (F64, F64, F64), (F64, F64, F64) -> (F64, F64, F64)
+symbolic_cross_sorted = |(ax, ay, _az), (bx, by, bz)|
+	if bx != 0.0 or by != 0.0 {
+		(-by, bx, 0.0)
+	} else if bz != 0.0 {
+		(bz, 0.0, 0.0)
+	} else if ax != 0.0 or ay != 0.0 {
+		(ay, -ax, 0.0)
+	} else {
+		(1.0, 0.0, 0.0)
+	}
+
+## The vector multiplied by `2^n`.
+scale3 : (F64, F64, F64), I32 -> (F64, F64, F64)
+scale3 = |(x, y, z), n| (scale_f64(x, n), scale_f64(y, n), scale_f64(z, n))
+
+## `x` multiplied by `2^n`, in steps whose factors are exact doubles.
+scale_f64 : F64, I32 -> F64
+scale_f64 = |x, n| {
+	var $out = x
+	var $left = n
+	while $left != 0 {
+		step = $left.max(-1000).min(1000)
+		$out = $out * pow2(step)
+		$left = $left - step
+	}
+	$out
+}
+
+## `2^n` for `n` in `[-1074, 1023]`, built from its bits so that it is exact
+## in the subnormal range too.
+pow2 : I32 -> F64
+pow2 = |n|
+	if n >= -1022 {
+		F64.from_bits((n + 1023).to_u64_wrap().shl_wrap(52))
+	} else {
+		F64.from_bits((1.U64).shl_wrap((n + 1074).to_u8_wrap()))
+	}
+
+## The exponent `e` for which `x = m * 2^e` with `0.5 <= |m| < 1`, as `frexp`
+## gives it. Zero for zero.
+frexp_exponent : F64 -> I32
+frexp_exponent = |x| {
+	magnitude = x.abs()
+	if magnitude == 0.0 or !magnitude.is_finite() {
+		return 0
+	}
+	raw = magnitude.to_bits().shr_zf_wrap(52).bitwise_and(0x7ff).to_i32_wrap()
+	if raw == 0 {
+		# A subnormal: the position of its top bit.
+		mantissa = magnitude.to_bits()
+		-1074 + (64 - mantissa.count_leading_zero_bits().to_i32())
+	} else {
+		raw - 1022
+	}
 }
 
 ## `2^n` for `n` in `[-600, 600]`.
@@ -341,3 +532,20 @@ expect S2Exact.scale_by_power_of_two([3.0], -2) == [0.75]
 # A shift larger than one step goes in several steps.
 expect S2Exact.scale_by_power_of_two([1.0], 1000) == [1.0715086071862673e301]
 expect S2Exact.sign_of(S2Exact.dot_exact(S2Exact.cross((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)), S2Exact.vector((1.0, 2.0, 3.0)))) == 0
+
+# Upstream's internal::SymbolicCrossProd and ExactCrossProd at v0.14.0,
+# through tools/s2_oracle.cc. The first three are the cases that cannot occur
+# in practice from upstream's RobustCrossProdCoverage test, where one input is
+# zero.
+expect S2Exact.symbolic_cross((-1.0, 0.0, 0.0), (0.0, 0.0, 0.0)) == (0.0, 1.0, 0.0)
+expect S2Exact.symbolic_cross((0.0, 0.0, 0.0), (0.0, -1.0, 0.0)) == (1.0, 0.0, -0.0)
+expect S2Exact.symbolic_cross((0.0, 0.0, 0.0), (0.0, 0.0, -1.0)) == (-1.0, -0.0, -0.0)
+# Tiny inputs whose cross product is far below the smallest double.
+expect S2Exact.exact_cross_prod((1e-200, 0.0, 0.0), (0.0, 1e-200, 0.0)) == (0.0, 0.0, 0.58591449441984966)
+expect S2Exact.exact_cross_prod((3.0, 0.0, 0.0), (0.0, 1e-300, 1e-300)) == (0.0, -0.50226965961856285, 0.50226965961856285)
+expect S2Exact.exponent([1.0]) == 1
+expect S2Exact.exponent([-0.75]) == 0
+expect S2Exact.exponent([5e-324]) == -1073
+# 1 - 2^-60 is below 1, although its largest component is 1.
+expect S2Exact.exponent([-8.673617379884035e-19, 1.0]) == 0
+expect S2Exact.exponent([1.1102230246251565e-16, 0.5, 1.0]) == 1

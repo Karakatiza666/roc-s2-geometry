@@ -1,6 +1,7 @@
 import S1Angle
 import Internal/S2Math
 import Internal/S2Coder
+import Internal/S2Exact
 
 ## A point in three-dimensional Euclidean space.
 ##
@@ -197,25 +198,37 @@ S2Point := { x : F64, y : F64, z : F64 }.{
 		a.cross(temp).normalize()
 	}
 
-	## A cross product that stays orthogonal to both inputs even when they are
-	## nearly parallel or nearly opposite.
+	## A vector in the direction of `a x b` that stays orthogonal to both
+	## inputs even when they are nearly parallel, nearly opposite, or exactly
+	## proportional. Upstream's `S2::RobustCrossProd`. Both inputs must be
+	## unit length.
 	##
-	## `(b + a) x (b - a)` is twice `a x b` mathematically, but its two factors
-	## are perpendicular for unit-length inputs, which is what makes it stable.
-	## Exactly proportional inputs fall back to `ortho(a)`, so the result is
-	## never zero.
+	## The result is not unit length. `(a - b) x (a + b)`, which is twice
+	## `a x b`, decides almost every case, because its two factors are
+	## perpendicular. When its error bound is too large, the cross product is
+	## computed in exact arithmetic, and when that is exactly zero, a
+	## symbolic perturbation gives the direction, the same one that
+	## `S2Predicates.sign` uses. So the result is never zero, and for exactly
+	## proportional inputs its direction is canonical. A result too small to
+	## normalize without a loss of precision is scaled up by a power of two.
+	## Equal inputs give `ortho(a)`.
 	##
-	## Upstream's current version escalates to exact arithmetic and symbolic
-	## perturbation for the proportional case; this one does not, so the
-	## direction it picks there is arbitrary rather than canonical.
+	## Upstream tries `long double` precision between the rounded and the
+	## exact step; this port goes straight to exact arithmetic. Where upstream
+	## takes that step, its result has twice the length of this port's and
+	## can differ in the last digit of its direction, which stays within
+	## `S2Edge.robust_cross_prod_error`.
 	robust_cross : S2Point, S2Point -> S2Point
 	robust_cross = |a, b| {
-		result = (b + a).cross(b - a)
-		if result == S2Point.zero() {
-			a.ortho()
-		} else {
-			result
+		result = (a - b).cross(a + b)
+		if result.norm2() >= robust_cross_min_norm * robust_cross_min_norm {
+			return result
 		}
+		if a == b {
+			return a.ortho()
+		}
+		(cx, cy, cz) = S2Exact.exact_cross_prod((a.x, a.y, a.z), (b.x, b.y, b.z))
+		S2Point.new(cx, cy, cz)
 	}
 
 	## A unit vector that differs from the point, used as the reference
@@ -451,6 +464,16 @@ min_f64 = |a, b| if (b < a) b else a
 max_f64 : F64, F64 -> F64
 max_f64 = |a, b| if (a < b) b else a
 
+## The smallest length of `(a - b) x (a + b)` for which its direction is
+## within `6 * 2^-53` radians of `a x b` in double precision, upstream's
+## `kMinNorm` in `GetStableCrossProd`.
+robust_cross_min_norm : F64
+robust_cross_min_norm = {
+	dbl_err = 1.1102230246251565e-16
+	sqrt3 = 1.7320508075688772
+	(32.0 * sqrt3 * dbl_err) / (6.0 * dbl_err / dbl_err - (1.0 + 2.0 * sqrt3))
+}
+
 ## The angle between two unit-length points by Kahan's formula,
 ## `2 * atan2(|a - b|, |a + b|)`.
 ##
@@ -487,8 +510,67 @@ expect {
 	cross = a.robust_cross(b).normalize()
 	cross.dot(a).abs() < 1e-15 and cross.dot(b).abs() < 1e-15
 }
-expect S2Point.new(1.0, 0.0, 0.0).robust_cross(S2Point.new(1.0, 0.0, 0.0)) != S2Point.zero()
-expect S2Point.new(1.0, 0.0, 0.0).robust_cross(S2Point.new(-1.0, 0.0, 0.0)) != S2Point.zero()
+
+# S2::RobustCrossProd and internal::ExactCrossProd at v0.14.0, through
+# tools/s2_oracle.cc. The first cases are from upstream's
+# RobustCrossProdCoverage test. In double precision the result is
+# (a - b) x (a + b), twice a x b.
+expect S2Point.new(1.0, 0.0, 0.0).robust_cross(S2Point.new(0.0, 1.0, 0.0)) == S2Point.new(-0.0, 0.0, 2.0)
+expect S2Point.new(2.220446049250313e-15, 1.0, 0.0).robust_cross(S2Point.new(0.0, 1.0, 0.0))
+	== S2Point.new(0.0, 0.0, 4.4408920985006262e-15)
+# Upstream decides this one in long double precision, which gives twice the
+# exact result that this port gives.
+expect S2Point.new(1.7763568394002505e-15, 1.0, 0.0).robust_cross(S2Point.new(0.0, 1.0, 0.0))
+	== S2Point.new(0.0, 0.0, 1.7763568394002505e-15)
+# Exact arithmetic.
+expect S2Point.new(2.168404344971009e-19, 1.0, 0.0).robust_cross(S2Point.new(0.0, 1.0, 0.0))
+	== S2Point.new(0.0, 0.0, 2.1684043449710089e-19)
+# Exact results too small to normalize are scaled up.
+expect S2Point.new(5e-324, 1.0, 0.0).robust_cross(S2Point.new(0.0, 1.0, 0.0)) == S2Point.new(0.0, 0.0, 0.5)
+# Even when the exact cross product underflows in double precision.
+expect S2Point.new(5e-324, 1.0, 0.0).robust_cross(S2Point.new(5e-324, 0.99999999999999989, 0.0))
+	== S2Point.new(0.0, 0.0, -0.5)
+# Exactly proportional inputs, where the symbolic perturbation decides.
+expect S2Point.new(1.0, 0.0, 0.0).robust_cross(S2Point.new(1.0000000000000002, 0.0, 0.0))
+	== S2Point.new(-0.0, 1.0000000000000002, 0.0)
+expect S2Point.new(0.0, 1.0000000000000002, 0.0).robust_cross(S2Point.new(0.0, 1.0, 0.0))
+	== S2Point.new(1.0000000000000002, -0.0, -0.0)
+expect S2Point.new(0.0, 0.0, 1.0).robust_cross(S2Point.new(0.0, 0.0, -1.0)) == S2Point.new(-1.0, -0.0, -0.0)
+expect {
+	# Antipodal points in general position.
+	a = S2Point.new(0.2672612419124244, 0.53452248382484879, 0.80178372573727319)
+	a.robust_cross(-a) == S2Point.new(0.53452248382484879, -0.2672612419124244, -0.0)
+}
+expect {
+	# Nearly parallel points one unit in the last place apart. Upstream uses
+	# long double precision for both, and this port exact arithmetic.
+	a = S2Point.new(0.2672612419124244, 0.53452248382484879, 0.80178372573727319)
+	b = S2Point.new(0.26726124191242445, 0.53452248382484879, 0.80178372573727319)
+	c = S2Point.new(0.26726124191242434, 0.53452248382484879, 0.80178372573727319)
+	a.robust_cross(b) == S2Point.new(0.0, 4.4507937654163121e-17, -2.9671958436108747e-17)
+		and a.robust_cross(c) == S2Point.new(0.0, -4.4507937654163121e-17, 2.9671958436108747e-17)
+}
+expect {
+	# Equal inputs give ortho(a).
+	a = S2Point.new(0.2672612419124244, 0.53452248382484879, 0.80178372573727319)
+	a.robust_cross(a) == S2Point.new(-0.95061496677367296, 0.0099897114561352043, 0.3102118479538008)
+}
+# Upstream's RobustCrossProdMagnitude: the results are scaled so that the
+# angle between two of them can still be measured.
+expect S2Point.new(1.0, 0.0, 0.0).robust_cross(S2Point.new(1.0, 1e-100, 0.0)) == S2Point.new(0.0, 0.0, 0.87490028991320479)
+expect S2Point.new(1.0, 0.0, 0.0).robust_cross(S2Point.new(1.0, 0.0, 1e-100)) == S2Point.new(0.0, -0.87490028991320479, 0.0)
+expect S2Point.new(-1e-100, 0.0, 1.0).robust_cross(S2Point.new(1e-100, 0.0, -1.0)) == S2Point.new(-0.0, 1.7498005798264096, 0.0)
+expect S2Point.new(0.0, -1e-100, 1.0).robust_cross(S2Point.new(0.0, 1e-100, -1.0)) == S2Point.new(-1.7498005798264096, 0.0, 0.0)
+expect {
+	ab = S2Point.new(1.0, 0.0, 0.0).robust_cross(S2Point.new(1.0, 1e-100, 0.0))
+	ac = S2Point.new(1.0, 0.0, 0.0).robust_cross(S2Point.new(1.0, 0.0, 1e-100))
+	ab.angle_to(ac).radians() == 0.5 * F64.pi
+}
+expect {
+	ab = S2Point.new(-1e-100, 0.0, 1.0).robust_cross(S2Point.new(1e-100, 0.0, -1.0))
+	cd = S2Point.new(0.0, -1e-100, 1.0).robust_cross(S2Point.new(0.0, 1e-100, -1.0))
+	ab.angle_to(cd).radians() == 0.5 * F64.pi
+}
 expect {
 	rotated = S2Point.new(1.0, 0.0, 0.0)
 		.rotate(S2Point.new(0.0, 0.0, 1.0), S1Angle.from_degrees(90.0))
