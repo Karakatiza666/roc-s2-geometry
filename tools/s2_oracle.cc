@@ -224,13 +224,42 @@
 //                                     bound, then per cell Contains and
 //                                     MayIntersect, per point Contains, then
 //                                     the covering and interior covering.
+//
+// The polyline simplifier and polyline alignment. A radius DEG is in degrees
+// and becomes S1ChordAngle(S1Angle::Degrees(DEG)); a radius L2 is a squared
+// chord length. Booleans print as 0 or 1.
+//
+//   simp SRC OP ...                   S2PolylineSimplifier, Init(SRC) and
+//                                     then each OP in turn: "t P DEG"
+//                                     TargetDisc, "a P DEG LEFT" AvoidDisc,
+//                                     "tc P L2" and "ac P L2 LEFT" the same
+//                                     with a squared chord length, "x P"
+//                                     Extend, "i P" Init. Prints the result
+//                                     of each OP but "i".
+//   simp_precision SEED N             N cases in the manner of upstream's
+//                                     Precision test, from std::mt19937_64.
+//                                     One line per case: SRC DST, then five
+//                                     discs as AVOID LEFT X L2, then the
+//                                     results of the five calls and of
+//                                     Extend(DST).
+//   al_exact CHAIN CHAIN              GetExactVertexAlignment cost,
+//                                     GetExactVertexAlignmentCost, "|", the
+//                                     warp path as index pairs
+//   al_approx R CHAIN CHAIN           GetApproxVertexAlignment with radius R
+//                                     (R < 0 for the default): cost, "|",
+//                                     the warp path
+//   al_medoid APPROX N CHAIN ...      GetMedoidPolyline
+//   al_consensus APPROX SEED_MEDOID CAP N CHAIN ...
+//                                     vertices of GetConsensusPolyline
 
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -264,6 +293,8 @@
 #include "s2/s2point_region.h"
 #include "s2/s2polygon.h"
 #include "s2/s2polyline.h"
+#include "s2/s2polyline_alignment.h"
+#include "s2/s2polyline_simplifier.h"
 #include "s2/s2pointutil.h"
 #include "s2/s2region.h"
 #include "s2/s2region_coverer.h"
@@ -637,6 +668,146 @@ std::unique_ptr<S2::Projection> MakeProjection(std::istringstream& in) {
 
 void PrintR2(const R2Point& p) { Print({p.x(), p.y()}); }
 
+void PrintWarpPath(const s2polyline_alignment::WarpPath& path) {
+  for (const auto& pair : path) std::printf(" %d %d", pair.first, pair.second);
+  std::printf("\n");
+}
+
+std::vector<std::unique_ptr<S2Polyline>> PolylineList(std::istringstream& in) {
+  int n;
+  in >> n;
+  std::vector<std::unique_ptr<S2Polyline>> lines;
+  for (int i = 0; i < n; ++i) {
+    lines.push_back(std::make_unique<S2Polyline>(Chain(in), S2Debug::DISABLE));
+  }
+  return lines;
+}
+
+int Polylines(const std::string& kind, std::istringstream& in) {
+  namespace al = s2polyline_alignment;
+  if (kind == "simp") {
+    S2PolylineSimplifier s;
+    s.Init(Point(in));
+    std::string op;
+    const char* separator = "";
+    while (in >> op) {
+      if (op == "i") {
+        s.Init(Point(in));
+        continue;
+      }
+      bool result;
+      if (op == "x") {
+        result = s.Extend(Point(in));
+      } else {
+        S2Point p = Point(in);
+        double r = Number(in);
+        S1ChordAngle radius = (op == "t" || op == "a")
+                                  ? S1ChordAngle(S1Angle::Degrees(r))
+                                  : S1ChordAngle::FromLength2(r);
+        if (op == "t" || op == "tc") {
+          result = s.TargetDisc(p, radius);
+        } else if (op == "a" || op == "ac") {
+          int left;
+          in >> left;
+          result = s.AvoidDisc(p, radius, left != 0);
+        } else {
+          return Fail(kind + " " + op);
+        }
+      }
+      std::printf("%s%d", separator, result ? 1 : 0);
+      separator = " ";
+    }
+    std::printf("\n");
+  } else if (kind == "simp_precision") {
+    // Upstream's Precision test with a fixed generator in place of
+    // absl::BitGen, and a uniform point in a cube, normalized, in place of
+    // s2random::Point.
+    unsigned long long seed;
+    int n;
+    in >> seed >> n;
+    std::mt19937_64 gen(seed);
+    auto uniform = [&gen](double lo, double hi) {
+      return std::uniform_real_distribution<double>(lo, hi)(gen);
+    };
+    auto random_point = [&]() {
+      for (;;) {
+        S2Point p(uniform(-1, 1), uniform(-1, 1), uniform(-1, 1));
+        if (p.Norm2() > 1e-4 && p.Norm2() <= 1) return p.Normalize();
+      }
+    };
+    const S1Angle kMaxError = S1Angle::Radians(25 * DBL_EPSILON);
+    for (int iter = 0; iter < n; ++iter) {
+      S2PolylineSimplifier simplifier;
+      S2Point src = random_point();
+      simplifier.Init(src);
+      S2Point dst = S2::GetPointOnLine(src, random_point(),
+                                       S1Angle::Radians(uniform(0.0, 1.0)));
+      S2Point nrm = S2::RobustCrossProd(src, dst).Normalize();
+      constexpr int kNumDiscs = 5;
+      int bad_disc =
+          std::uniform_int_distribution<int>(-kNumDiscs, kNumDiscs - 1)(gen);
+      std::printf("%.17g %.17g %.17g %.17g %.17g %.17g", src.x(), src.y(),
+                  src.z(), dst.x(), dst.y(), dst.z());
+      std::string results;
+      for (int i = 0; i < kNumDiscs; ++i) {
+        double f = uniform(-0.5, 1.0);
+        S2Point a = ((1 - f) * src + f * dst).Normalize();
+        S1Angle r = S1Angle::Radians(uniform(0.0, 1.0));
+        bool on_left = uniform(0.0, 1.0) < 0.5;
+        S2Point x = S2::GetPointOnLine(a, on_left ? nrm : -nrm, r);
+        if (f < 0) r = S1Angle(src, x);
+        bool avoid = uniform(0.0, 1.0) < 0.5;
+        bool grow_radius = (avoid == (i == bad_disc));
+        S1ChordAngle radius(grow_radius ? r + kMaxError : r - kMaxError);
+        bool result = avoid ? simplifier.AvoidDisc(x, radius, on_left)
+                            : simplifier.TargetDisc(x, radius);
+        std::printf(" %d %d %.17g %.17g %.17g %.17g", avoid ? 1 : 0,
+                    on_left ? 1 : 0, x.x(), x.y(), x.z(), radius.length2());
+        results += result ? " 1" : " 0";
+      }
+      std::printf("%s %d\n", results.c_str(), simplifier.Extend(dst) ? 1 : 0);
+    }
+  } else if (kind == "al_exact") {
+    S2Polyline a(Chain(in), S2Debug::DISABLE);
+    S2Polyline b(Chain(in), S2Debug::DISABLE);
+    al::VertexAlignment v = al::GetExactVertexAlignment(a, b);
+    std::printf("%.17g %.17g |", v.alignment_cost,
+                al::GetExactVertexAlignmentCost(a, b));
+    PrintWarpPath(v.warp_path);
+  } else if (kind == "al_approx") {
+    int radius;
+    in >> radius;
+    S2Polyline a(Chain(in), S2Debug::DISABLE);
+    S2Polyline b(Chain(in), S2Debug::DISABLE);
+    al::VertexAlignment v = radius < 0
+                                ? al::GetApproxVertexAlignment(a, b)
+                                : al::GetApproxVertexAlignment(a, b, radius);
+    std::printf("%.17g |", v.alignment_cost);
+    PrintWarpPath(v.warp_path);
+  } else if (kind == "al_medoid") {
+    int approx;
+    in >> approx;
+    auto lines = PolylineList(in);
+    al::MedoidOptions options;
+    options.set_approx(approx != 0);
+    std::printf("%d\n", al::GetMedoidPolyline(lines, options));
+  } else if (kind == "al_consensus") {
+    int approx, seed_medoid, cap;
+    in >> approx >> seed_medoid >> cap;
+    auto lines = PolylineList(in);
+    al::ConsensusOptions options;
+    options.set_approx(approx != 0);
+    options.set_seed_medoid(seed_medoid != 0);
+    options.set_iteration_cap(cap);
+    auto result = al::GetConsensusPolyline(lines, options);
+    PrintPoints(std::vector<S2Point>(result->vertices_span().begin(),
+                                      result->vertices_span().end()));
+  } else {
+    return Fail(kind);
+  }
+  return 0;
+}
+
 int Extras(const std::string& kind, std::istringstream& in) {
   if (kind == "fmt_g") {
     int precision;
@@ -816,7 +987,7 @@ int Extras(const std::string& kind, std::istringstream& in) {
     PrintIds(interior);
     std::printf("\n");
   } else {
-    return Fail(kind);
+    return Polylines(kind, in);
   }
   return 0;
 }

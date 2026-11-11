@@ -42,6 +42,8 @@ package
 		S2PointRegion,
 		S2Polygon,
 		S2Polyline,
+		S2PolylineAlignment,
+		S2PolylineSimplifier,
 		S2Predicates,
 		S2Projection,
 		S2Region,

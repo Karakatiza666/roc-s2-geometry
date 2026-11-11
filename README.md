@@ -89,6 +89,8 @@ With no arguments it covers the same 2 km around San Francisco.
 | `S2RegionTermIndexer` | Turns regions into index terms for a text search system |
 | `S2Region` `S2RegionUnion` `S2RegionIntersection` | Any region with its type forgotten, and the union and intersection of a list of them |
 | `S2Loop` `S2Polyline` | A simple closed polygon and an open chain of edges |
+| `S2PolylineSimplifier` | Tests whether one edge can replace a chain, passing near some points and away from others |
+| `S2PolylineAlignment` | Vertex alignments between polylines by dynamic time warping, and the medoid or consensus of a set of them |
 | `S2Polygon` | Loops nested into a region with holes, and the predicates between two of them |
 | `S2PointRegion` | A single point as a region, so that a coverer can cover it |
 | `S2ConvexHullQuery` | The smallest convex loop around a set of points, polylines, loops and polygons |
