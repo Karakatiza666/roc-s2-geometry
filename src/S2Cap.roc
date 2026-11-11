@@ -72,12 +72,15 @@ S2Cap := { center : S2Point, radius : S1ChordAngle }.{
 		$cap
 	}
 
+	## The cap that contains no point.
 	empty : () -> S2Cap
 	empty = || { center: S2Point.new(1.0, 0.0, 0.0), radius: S1ChordAngle.negative() }
 
+	## The cap that contains every point of the sphere.
 	full : () -> S2Cap
 	full = || { center: S2Point.new(1.0, 0.0, 0.0), radius: S1ChordAngle.straight() }
 
+	## The center of the cap, a unit vector.
 	center : S2Cap -> S2Point
 	center = |cap| cap.center
 
@@ -97,9 +100,11 @@ S2Cap := { center : S2Point, radius : S1ChordAngle }.{
 	area : S2Cap -> F64
 	area = |cap| 2.0 * F64.pi * cap.height().max(0.0)
 
+	## True when the cap contains no point.
 	is_empty : S2Cap -> Bool
 	is_empty = |cap| cap.radius.is_negative()
 
+	## True when the cap contains every point of the sphere.
 	is_full : S2Cap -> Bool
 	is_full = |cap| cap.radius.length2() == 4.0
 
@@ -107,6 +112,8 @@ S2Cap := { center : S2Point, radius : S1ChordAngle }.{
 	has_interior : S2Cap -> Bool
 	has_interior = |cap| cap.radius.length2() > 0.0
 
+	## True when the center is a unit vector and the radius is at most 180
+	## degrees.
 	is_valid : S2Cap -> Bool
 	is_valid = |cap| cap.center.is_unit_length() and cap.radius.length2() <= 4.0
 
@@ -127,13 +134,18 @@ S2Cap := { center : S2Point, radius : S1ChordAngle }.{
 			}
 		}
 
+	## True when the point is in the cap or on its boundary.
 	contains_point : S2Cap, S2Point -> Bool
 	contains_point = |cap, p| S1ChordAngle.from_points(cap.center, p) <= cap.radius
 
+	## True when the point is strictly inside the cap. A full cap contains
+	## every point.
 	interior_contains_point : S2Cap, S2Point -> Bool
 	interior_contains_point = |cap, p|
 		cap.is_full() or S1ChordAngle.from_points(cap.center, p) < cap.radius
 
+	## True when every point of `other` is in this cap. A full cap contains
+	## every cap, and every cap contains an empty cap.
 	contains_cap : S2Cap, S2Cap -> Bool
 	contains_cap = |cap, other| {
 		if cap.is_full() or other.is_empty() {
@@ -142,6 +154,8 @@ S2Cap := { center : S2Point, radius : S1ChordAngle }.{
 		cap.radius >= S1ChordAngle.from_points(cap.center, other.center) + other.radius
 	}
 
+	## True when the two caps share at least one point. An empty cap shares no
+	## point.
 	intersects_cap : S2Cap, S2Cap -> Bool
 	intersects_cap = |cap, other| {
 		if cap.is_empty() or other.is_empty() {
@@ -150,6 +164,8 @@ S2Cap := { center : S2Point, radius : S1ChordAngle }.{
 		cap.radius + other.radius >= S1ChordAngle.from_points(cap.center, other.center)
 	}
 
+	## True when the interior of this cap shares at least one point with
+	## `other`. A cap with no interior, or an empty `other`, gives false.
 	interior_intersects_cap : S2Cap, S2Cap -> Bool
 	interior_intersects_cap = |cap, other| {
 		if !cap.has_interior() or other.is_empty() {

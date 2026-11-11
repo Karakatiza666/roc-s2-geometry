@@ -35,6 +35,7 @@ S2CellUnion := { ids : List(S2CellId) }.{
 	from_normalized_cell_ids : List(S2CellId) -> S2CellUnion
 	from_normalized_cell_ids = |ids| { ids: ids }
 
+	## The union that contains no cell.
 	empty : () -> S2CellUnion
 	empty = || { ids: [] }
 
@@ -51,15 +52,20 @@ S2CellUnion := { ids : List(S2CellId) }.{
 		],
 	}
 
+	## The ids of the cells, in the order stored.
 	cell_ids : S2CellUnion -> List(S2CellId)
 	cell_ids = |u| u.ids
 
+	## The number of cells in the union.
 	num_cells : S2CellUnion -> U64
 	num_cells = |u| u.ids.len()
 
+	## The id of the `index`-th cell, or `OutOfBounds` when there is no such
+	## cell.
 	cell_id_at : S2CellUnion, U64 -> Try(S2CellId, [OutOfBounds])
 	cell_id_at = |u, index| u.ids.get(index)
 
+	## True when the union has no cell.
 	is_empty : S2CellUnion -> Bool
 	is_empty = |u| u.ids.is_empty()
 
@@ -117,12 +123,16 @@ S2CellUnion := { ids : List(S2CellId) }.{
 		index != 0 and (u.ids.get(index - 1) ?? S2CellId.none()).range_max() >= cell_id.range_min()
 	}
 
+	## True when the leaf cell that holds the point is in the union.
 	contains_point : S2CellUnion, S2Point -> Bool
 	contains_point = |u, p| u.contains_cell_id(S2CellId.from_point(p))
 
+	## True when the leaf cell that holds the position is in the union.
 	contains_lat_lng : S2CellUnion, S2LatLng -> Bool
 	contains_lat_lng = |u, ll| u.contains_cell_id(S2CellId.from_lat_lng(ll))
 
+	## True when the union covers every cell of `other`. Every union contains
+	## an empty union.
 	contains_union : S2CellUnion, S2CellUnion -> Bool
 	contains_union = |u, other| {
 		var $ok = Bool.True
@@ -134,6 +144,8 @@ S2CellUnion := { ids : List(S2CellId) }.{
 		$ok
 	}
 
+	## True when the union covers part of at least one cell of `other`. An
+	## empty union intersects nothing.
 	intersects_union : S2CellUnion, S2CellUnion -> Bool
 	intersects_union = |u, other| {
 		var $hit = Bool.False
@@ -322,9 +334,12 @@ S2CellUnion := { ids : List(S2CellId) }.{
 		$bound
 	}
 
+	## True when the union covers the whole of the cell.
 	contains_cell : S2CellUnion, S2Cell -> Bool
 	contains_cell = |u, cell| u.contains_cell_id(cell.id())
 
+	## True when the union covers any part of the cell. The answer is exact for
+	## a cell union.
 	may_intersect_cell : S2CellUnion, S2Cell -> Bool
 	may_intersect_cell = |u, cell| u.intersects_cell_id(cell.id())
 

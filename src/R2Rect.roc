@@ -37,12 +37,15 @@ R2Rect := { x : R1Interval, y : R1Interval }.{
 		y: R1Interval.new(center.y() - 0.5 * size.y(), center.y() + 0.5 * size.y()),
 	}
 
+	## The empty rectangle.
 	empty : () -> R2Rect
 	empty = || { x: R1Interval.empty(), y: R1Interval.empty() }
 
+	## The interval of x coordinates.
 	x : R2Rect -> R1Interval
 	x = |r| r.x
 
+	## The interval of y coordinates.
 	y : R2Rect -> R1Interval
 	y = |r| r.y
 
@@ -74,9 +77,11 @@ R2Rect := { x : R1Interval, y : R1Interval }.{
 	is_valid : R2Rect -> Bool
 	is_valid = |r| r.x.is_empty() == r.y.is_empty()
 
+	## True when the rectangle contains no point.
 	is_empty : R2Rect -> Bool
 	is_empty = |r| r.x.is_empty()
 
+	## The center of the rectangle. Undefined for an empty rectangle.
 	center : R2Rect -> R2Point
 	center = |r| R2Point.new(r.x.center(), r.y.center())
 
@@ -84,31 +89,42 @@ R2Rect := { x : R1Interval, y : R1Interval }.{
 	size : R2Rect -> R2Point
 	size = |r| R2Point.new(r.x.length(), r.y.length())
 
+	## True when the point is in the rectangle or on its boundary.
 	contains_point : R2Rect, R2Point -> Bool
 	contains_point = |r, p| r.x.contains_point(p.x()) and r.y.contains_point(p.y())
 
+	## True when the point is strictly inside the rectangle.
 	interior_contains_point : R2Rect, R2Point -> Bool
 	interior_contains_point = |r, p|
 		r.x.interior_contains_point(p.x()) and r.y.interior_contains_point(p.y())
 
+	## True when every point of `other` is in this rectangle. Every rectangle
+	## contains an empty rectangle.
 	contains_rect : R2Rect, R2Rect -> Bool
 	contains_rect = |r, other|
 		r.x.contains_interval(other.x) and r.y.contains_interval(other.y)
 
+	## True when every point of `other` is strictly inside this rectangle.
+	## Every rectangle contains an empty rectangle.
 	interior_contains_rect : R2Rect, R2Rect -> Bool
 	interior_contains_rect = |r, other|
 		r.x.interior_contains_interval(other.x) and r.y.interior_contains_interval(other.y)
 
+	## True when the two rectangles share at least one point.
 	intersects : R2Rect, R2Rect -> Bool
 	intersects = |r, other| r.x.intersects(other.x) and r.y.intersects(other.y)
 
+	## True when the interior of this rectangle shares at least one point with
+	## `other`.
 	interior_intersects : R2Rect, R2Rect -> Bool
 	interior_intersects = |r, other|
 		r.x.interior_intersects(other.x) and r.y.interior_intersects(other.y)
 
+	## The smallest rectangle that contains this rectangle and the point.
 	add_point : R2Rect, R2Point -> R2Rect
 	add_point = |r, p| { x: r.x.add_point(p.x()), y: r.y.add_point(p.y()) }
 
+	## The smallest rectangle that contains both rectangles. Same as `union`.
 	add_rect : R2Rect, R2Rect -> R2Rect
 	add_rect = |r, other| { x: r.x.union(other.x), y: r.y.union(other.y) }
 
@@ -132,9 +148,12 @@ R2Rect := { x : R1Interval, y : R1Interval }.{
 	expanded_by : R2Rect, F64 -> R2Rect
 	expanded_by = |r, margin| r.expanded(R2Point.new(margin, margin))
 
+	## The smallest rectangle that contains both rectangles.
 	union : R2Rect, R2Rect -> R2Rect
 	union = |r, other| { x: r.x.union(other.x), y: r.y.union(other.y) }
 
+	## The largest rectangle in both rectangles. The result is empty when they
+	## do not overlap.
 	intersection : R2Rect, R2Rect -> R2Rect
 	intersection = |r, other| {
 		xx = r.x.intersection(other.x)
@@ -146,6 +165,8 @@ R2Rect := { x : R1Interval, y : R1Interval }.{
 		}
 	}
 
+	## True when each bound of one rectangle is within `max_error` of the same
+	## bound of the other.
 	approx_eq : R2Rect, R2Rect, F64 -> Bool
 	approx_eq = |r, other, max_error|
 		r.x.approx_eq(other.x, max_error) and r.y.approx_eq(other.y, max_error)

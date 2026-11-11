@@ -9,15 +9,21 @@ import S2Point
 ## `is_valid` reports whether they hold and `normalized` restores them.
 S2LatLng := { lat : F64, lng : F64 }.{
 
+	## The position with latitude `lat` and longitude `lng`, both in radians.
+	## The values are not checked or normalized.
 	from_radians : F64, F64 -> S2LatLng
 	from_radians = |lat, lng| { lat: lat, lng: lng }
 
+	## The position with latitude `lat` and longitude `lng`, both in degrees.
+	## The values are not checked or normalized.
 	from_degrees : F64, F64 -> S2LatLng
 	from_degrees = |lat, lng| {
 		lat: S1Angle.from_degrees(lat).radians(),
 		lng: S1Angle.from_degrees(lng).radians(),
 	}
 
+	## The position with the given latitude and longitude angles. The values
+	## are not checked or normalized.
 	from_angles : S1Angle, S1Angle -> S2LatLng
 	from_angles = |lat, lng| { lat: lat.radians(), lng: lng.radians() }
 
@@ -25,9 +31,11 @@ S2LatLng := { lat : F64, lng : F64 }.{
 	from_e5 : I64, I64 -> S2LatLng
 	from_e5 = |lat, lng| S2LatLng.from_degrees(lat.to_f64() * 1e-5, lng.to_f64() * 1e-5)
 
+	## The position from latitude and longitude in degrees scaled by 1e6.
 	from_e6 : I64, I64 -> S2LatLng
 	from_e6 = |lat, lng| S2LatLng.from_degrees(lat.to_f64() * 1e-6, lng.to_f64() * 1e-6)
 
+	## The position from latitude and longitude in degrees scaled by 1e7.
 	from_e7 : I64, I64 -> S2LatLng
 	from_e7 = |lat, lng| S2LatLng.from_degrees(lat.to_f64() * 1e-7, lng.to_f64() * 1e-7)
 
@@ -57,21 +65,27 @@ S2LatLng := { lat : F64, lng : F64 }.{
 	longitude : S2Point -> S1Angle
 	longitude = |p| S1Angle.from_radians(S2Math.atan2(p.y(), p.x()))
 
+	## The latitude as an angle.
 	lat : S2LatLng -> S1Angle
 	lat = |ll| S1Angle.from_radians(ll.lat)
 
+	## The longitude as an angle.
 	lng : S2LatLng -> S1Angle
 	lng = |ll| S1Angle.from_radians(ll.lng)
 
+	## The latitude in radians.
 	lat_radians : S2LatLng -> F64
 	lat_radians = |ll| ll.lat
 
+	## The longitude in radians.
 	lng_radians : S2LatLng -> F64
 	lng_radians = |ll| ll.lng
 
+	## The latitude in degrees.
 	lat_degrees : S2LatLng -> F64
 	lat_degrees = |ll| S1Angle.from_radians(ll.lat).degrees()
 
+	## The longitude in degrees.
 	lng_degrees : S2LatLng -> F64
 	lng_degrees = |ll| S1Angle.from_radians(ll.lng).degrees()
 
@@ -106,12 +120,18 @@ S2LatLng := { lat : F64, lng : F64 }.{
 		S1Angle.from_radians(2.0 * S2Math.atan2(x.sqrt(), (1.0 - x).max(0.0).sqrt()))
 	}
 
+	## Adds the latitudes and the longitudes. The result is not normalized.
+	## Written `a + b`.
 	plus : S2LatLng, S2LatLng -> S2LatLng
 	plus = |a, b| { lat: a.lat + b.lat, lng: a.lng + b.lng }
 
+	## Subtracts the latitude and longitude of `b` from those of `a`. The
+	## result is not normalized. Written `a - b`.
 	minus : S2LatLng, S2LatLng -> S2LatLng
 	minus = |a, b| { lat: a.lat - b.lat, lng: a.lng - b.lng }
 
+	## Multiplies the latitude and the longitude by `k`. The result is not
+	## normalized. Written `ll * k`.
 	times : S2LatLng, F64 -> S2LatLng
 	times = |ll, k| { lat: ll.lat * k, lng: ll.lng * k }
 

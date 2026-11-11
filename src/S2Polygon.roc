@@ -97,6 +97,7 @@ S2Polygon := { loops : List(Nested), bound : S2LatLngRect, inconsistent_orientat
 	loops : S2Polygon -> List(Nested)
 	loops = |polygon| polygon.loops
 
+	## The number of loops, shells and holes together.
 	num_loops : S2Polygon -> U64
 	num_loops = |polygon| polygon.loops.len()
 
@@ -118,9 +119,11 @@ S2Polygon := { loops : List(Nested), bound : S2LatLngRect, inconsistent_orientat
 	is_hole : Nested -> Bool
 	is_hole = |entry| entry.depth % 2 == 1
 
+	## True when the polygon has no loop.
 	is_empty : S2Polygon -> Bool
 	is_empty = |polygon| polygon.loops.is_empty()
 
+	## True when the polygon is the single full loop.
 	is_full : S2Polygon -> Bool
 	is_full = |polygon| polygon.loops.len() == 1 and polygon.loop_at(0).is_full()
 
@@ -247,6 +250,8 @@ S2Polygon := { loops : List(Nested), bound : S2LatLngRect, inconsistent_orientat
 		$inside
 	}
 
+	## True when the position is in the polygon. Same as `contains_point` on
+	## the matching point.
 	contains_lat_lng : S2Polygon, S2LatLng -> Bool
 	contains_lat_lng = |polygon, position| polygon.contains_point(position.to_point())
 

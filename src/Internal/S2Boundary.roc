@@ -293,20 +293,53 @@ S2Boundary := [].{
 	## The oriented area of the loop, summed over a fan of triangles. It is
 	## the area to the left of the loop, plus or minus a multiple of `4pi`.
 	##
-	## Ports upstream's `S2::GetSurfaceIntegral` with Kahan summation. When
-	## a fan edge would be nearly 180 degrees long, and so unstable, the fan
-	## moves its origin to a point well away from the edge, and adds the
-	## triangles that keep the sum correct.
+	## Ports upstream's `S2::GetSurfaceIntegralKahan` with `S2::SignedArea`,
+	## using Kahan summation over the triangles of `surface_triangles`.
 	surface_area : List(S2Point) -> F64
 	surface_area = |points| {
+		var $sum = (0.0, 0.0)
+		for t in S2Boundary.surface_triangles(points) {
+			$sum = S2Boundary.kahan_add($sum, S2Boundary.oriented_triangle_area(t.0, t.1, t.2))
+		}
+		$sum.0
+	}
+
+	## The centroid of the loop's interior, scaled by its area. It is the sum
+	## of `S2Point.true_centroid` over the triangles of `surface_triangles`,
+	## added plainly, as upstream does.
+	##
+	## Ports upstream's `S2::GetCentroid`. Either the interior or the negated
+	## exterior is integrated, and the two are equal because the integral of
+	## position over the whole sphere is zero. A list of fewer than three
+	## points gives the zero vector.
+	surface_centroid : List(S2Point) -> S2Point
+	surface_centroid = |points| {
+		var $sum = S2Point.zero()
+		for t in S2Boundary.surface_triangles(points) {
+			$sum = $sum.plus(S2Point.true_centroid(t.0, t.1, t.2))
+		}
+		$sum
+	}
+
+	## The oriented triangles that cover the loop, in the order that upstream's
+	## `S2::GetSurfaceIntegral` visits them. Each point of the interior is
+	## covered one more time than each point of the exterior, counting
+	## clockwise triangles as negative.
+	##
+	## The triangles are a fan from vertex 0. When a fan edge would be nearly
+	## 180 degrees long, and so unstable, the fan moves its origin to a point
+	## well away from the edge, and adds the triangles that keep the sum
+	## correct. A list of fewer than three points gives no triangles.
+	surface_triangles : List(S2Point) -> List((S2Point, S2Point, S2Point))
+	surface_triangles = |points| {
 		n = points.len()
 		if n < 3 {
-			return 0.0
+			return []
 		}
 		max_length = F64.pi - 1e-5
 		v0 = S2Boundary.vertex_at(points, 0)
 		var $origin = v0
-		var $sum = (0.0, 0.0)
+		var $triangles = []
 		var $i = 1
 		while $i + 1 < n {
 			vi = S2Boundary.vertex_at(points, $i)
@@ -319,18 +352,18 @@ S2Boundary := [].{
 					$origin = v0
 				} else {
 					$origin = v0.cross(old_origin)
-					$sum = S2Boundary.kahan_add($sum, S2Boundary.oriented_triangle_area(v0, old_origin, $origin))
+					$triangles = $triangles.append((v0, old_origin, $origin))
 				}
-				$sum = S2Boundary.kahan_add($sum, S2Boundary.oriented_triangle_area(old_origin, vi, $origin))
+				$triangles = $triangles.append((old_origin, vi, $origin))
 			}
-			$sum = S2Boundary.kahan_add($sum, S2Boundary.oriented_triangle_area($origin, vi, next))
+			$triangles = $triangles.append(($origin, vi, next))
 			$i = $i + 1
 		}
 		if $origin != v0 {
 			last = S2Boundary.vertex_at(points, n - 1)
-			$sum = S2Boundary.kahan_add($sum, S2Boundary.oriented_triangle_area($origin, last, v0))
+			$triangles = $triangles.append(($origin, last, v0))
 		}
-		$sum.0
+		$triangles
 	}
 
 	## The area of the triangle, negated when `S2Predicates.sign` says it is

@@ -22,15 +22,19 @@ S2Polyline := { vertices : List(S2Point) }.{
 	from_lat_lngs : List(S2LatLng) -> S2Polyline
 	from_lat_lngs = |points| { vertices: points.map(S2LatLng.to_point) }
 
+	## The polyline with no vertex.
 	empty : () -> S2Polyline
 	empty = || { vertices: [] }
 
+	## The vertices of the polyline, in order.
 	vertices : S2Polyline -> List(S2Point)
 	vertices = |line| line.vertices
 
+	## The number of vertices.
 	num_vertices : S2Polyline -> U64
 	num_vertices = |line| line.vertices.len()
 
+	## The `index`-th vertex, or `OutOfBounds` when there is no such vertex.
 	vertex : S2Polyline, U64 -> Try(S2Point, [OutOfBounds])
 	vertex = |line, index| line.vertices.get(index)
 

@@ -20,9 +20,11 @@ R1Interval := { lo : F64, hi : F64 }.{
 	from_point_pair : F64, F64 -> R1Interval
 	from_point_pair = |a, b| if (a <= b) { lo: a, hi: b } else { lo: b, hi: a }
 
+	## The lower bound.
 	lo : R1Interval -> F64
 	lo = |i| i.lo
 
+	## The upper bound.
 	hi : R1Interval -> F64
 	hi = |i| i.hi
 
@@ -30,6 +32,7 @@ R1Interval := { lo : F64, hi : F64 }.{
 	bound : R1Interval, U64 -> F64
 	bound = |i, k| if (k == 0) i.lo else i.hi
 
+	## True when `lo > hi`.
 	is_empty : R1Interval -> Bool
 	is_empty = |i| i.lo > i.hi
 
@@ -41,12 +44,16 @@ R1Interval := { lo : F64, hi : F64 }.{
 	length : R1Interval -> F64
 	length = |i| i.hi - i.lo
 
+	## True when `p` is in `[lo, hi]`. An empty interval contains no point.
 	contains_point : R1Interval, F64 -> Bool
 	contains_point = |i, p| p >= i.lo and p <= i.hi
 
+	## True when `p` is in the open interval `(lo, hi)`.
 	interior_contains_point : R1Interval, F64 -> Bool
 	interior_contains_point = |i, p| p > i.lo and p < i.hi
 
+	## True when every point of `other` is in this interval. Every interval
+	## contains an empty interval.
 	contains_interval : R1Interval, R1Interval -> Bool
 	contains_interval = |i, other|
 		if other.is_empty() {
@@ -55,6 +62,8 @@ R1Interval := { lo : F64, hi : F64 }.{
 			other.lo >= i.lo and other.hi <= i.hi
 		}
 
+	## True when every point of `other` is in the open interval `(lo, hi)`.
+	## Every interval contains an empty interval.
 	interior_contains_interval : R1Interval, R1Interval -> Bool
 	interior_contains_interval = |i, other|
 		if other.is_empty() {
@@ -63,6 +72,8 @@ R1Interval := { lo : F64, hi : F64 }.{
 			other.lo > i.lo and other.hi < i.hi
 		}
 
+	## True when the two intervals share at least one point. An empty interval
+	## shares no point.
 	intersects : R1Interval, R1Interval -> Bool
 	intersects = |i, other|
 		if i.lo <= other.lo {
@@ -71,6 +82,8 @@ R1Interval := { lo : F64, hi : F64 }.{
 			i.lo <= other.hi and i.lo <= i.hi
 		}
 
+	## True when the interior of this interval shares at least one point with
+	## `other`. An empty interval shares no point.
 	interior_intersects : R1Interval, R1Interval -> Bool
 	interior_intersects = |i, other|
 		other.lo < i.hi and i.lo < other.hi and i.lo < i.hi and other.lo <= other.hi
@@ -87,6 +100,8 @@ R1Interval := { lo : F64, hi : F64 }.{
 			{ lo: i.lo.min(other.lo), hi: i.hi.max(other.hi) }
 		}
 
+	## The largest interval in both intervals. The result is empty when they do
+	## not overlap.
 	intersection : R1Interval, R1Interval -> R1Interval
 	intersection = |i, other| { lo: i.lo.max(other.lo), hi: i.hi.min(other.hi) }
 

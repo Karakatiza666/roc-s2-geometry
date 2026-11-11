@@ -22,9 +22,12 @@ S2Metric := { deriv : F64, dim : U8 }.{
 	area : F64 -> S2Metric
 	area = |deriv| { deriv: deriv, dim: 2 }
 
+	## The constant that gives the metric at level 0. The value at level `k` is
+	## `deriv * 2^(-dim * k)`.
 	deriv : S2Metric -> F64
 	deriv = |m| m.deriv
 
+	## The dimension of the metric: 1 for a length and 2 for an area.
 	dim : S2Metric -> U8
 	dim = |m| m.dim
 
@@ -79,6 +82,8 @@ S2Metric := { deriv : F64, dim : U8 }.{
 	max_angle_span : S2Metric
 	max_angle_span = { deriv: 1.704897179199218452, dim: 1 }
 
+	## The angle a cell edge spans as seen from the sphere's centre, at its
+	## narrowest.
 	min_angle_span : S2Metric
 	min_angle_span = { deriv: 1.3333333333333333, dim: 1 }
 
@@ -90,9 +95,11 @@ S2Metric := { deriv : F64, dim : U8 }.{
 	max_edge : S2Metric
 	max_edge = { deriv: 1.704897179199218452, dim: 1 }
 
+	## The length of a cell edge, at its shortest.
 	min_edge : S2Metric
 	min_edge = { deriv: 0.9428090415820634, dim: 1 }
 
+	## The length of a cell edge, on average.
 	avg_edge : S2Metric
 	avg_edge = { deriv: 1.459213746386106062, dim: 1 }
 
@@ -100,9 +107,11 @@ S2Metric := { deriv : F64, dim : U8 }.{
 	max_diag : S2Metric
 	max_diag = { deriv: 2.438654594434021032, dim: 1 }
 
+	## The length of a cell diagonal, at its shortest.
 	min_diag : S2Metric
 	min_diag = { deriv: 1.2570787221094177, dim: 1 }
 
+	## The length of a cell diagonal, on average.
 	avg_diag : S2Metric
 	avg_diag = { deriv: 2.060422738998471683, dim: 1 }
 
@@ -115,12 +124,15 @@ S2Metric := { deriv : F64, dim : U8 }.{
 	min_width : S2Metric
 	min_width = { deriv: 0.9428090415820634, dim: 1 }
 
+	## The distance between opposite edges of a cell, on average.
 	avg_width : S2Metric
 	avg_width = { deriv: 1.434523672886099389, dim: 1 }
 
+	## The area of a cell, at its largest.
 	max_area : S2Metric
 	max_area = { deriv: 2.635799256963161491, dim: 2 }
 
+	## The area of a cell, at its smallest.
 	min_area : S2Metric
 	min_area = { deriv: 1.2570787221094177, dim: 2 }
 

@@ -49,9 +49,12 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 	full : () -> S2Loop
 	full = || S2Loop.from_points([S2Boundary.full_vertex()])
 
+	## The vertices of the loop, in order. The edge from the last vertex back
+	## to the first is implied.
 	vertices : S2Loop -> List(S2Point)
 	vertices = |loop| loop.vertices
 
+	## The number of vertices. The empty loop and the full loop each have one.
 	num_vertices : S2Loop -> U64
 	num_vertices = |loop| loop.vertices.len()
 
@@ -182,20 +185,11 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 
 	## The centroid of the loop's interior, scaled by its area so that the
 	## centroids of several loops can be summed.
+	##
+	## Follows upstream's `S2Loop::GetCentroid`. The result is not a unit
+	## vector. The empty and full loops give the zero vector.
 	centroid : S2Loop -> S2Point
-	centroid = |loop| {
-		if loop.vertices.len() < 3 {
-			return S2Point.zero()
-		}
-		origin = loop.vertex(0)
-		var $sum = S2Point.zero()
-		var $i = 1
-		while $i + 1 < loop.vertices.len() {
-			$sum = $sum + S2Point.true_centroid(origin, loop.vertex($i), loop.vertex($i + 1))
-			$i = $i + 1
-		}
-		$sum
-	}
+	centroid = |loop| S2Boundary.surface_centroid(loop.vertices)
 
 	## The total angle turned while walking the loop once, in radians: its
 	## geodesic curvature, equal to `2pi` less its area.
@@ -627,6 +621,20 @@ expect {
 	c.normalize().approx_eq(S2LatLng.from_degrees(0.0, 0.0).to_point(), 1e-12)
 }
 expect {
+	# The equator as four edges of 90 degrees each, so the fan from vertex 0
+	# needs an edge of 180 degrees unless the origin moves. The interior is the
+	# northern hemisphere. The integral of position over a hemisphere is
+	# (0, 0, pi), since the integral of cos(t) sin(t) dt over [0, pi/2] is 1/2
+	# and the longitude range is 2pi.
+	loop = S2Loop.from_points([
+		S2Point.new(1.0, 0.0, 0.0),
+		S2Point.new(0.0, 1.0, 0.0),
+		S2Point.new(-1.0, 0.0, 0.0),
+		S2Point.new(0.0, -1.0, 0.0),
+	])
+	loop.centroid().approx_eq(S2Point.new(0.0, 0.0, F64.pi), 1e-12)
+}
+expect {
 	# A loop around the north pole contains it, and its bound says so.
 	loop = S2Loop.from_lat_lngs([
 		S2LatLng.from_degrees(80.0, 0.0),
@@ -863,4 +871,23 @@ expect {
 	b = S2Point.new(0.0, 1.0, 0.0)
 	c = S2Point.new(0.0, 0.0, 1.0)
 	S2Loop.from_points([a, b, c]).invert().vertices() == [c, b, a]
+}
+expect {
+	# A loop with vertex 2 exactly antipodal to vertex 0, over (0, h, h) and
+	# then through (0, -1, 0) and (0, 0, -1), with h = sqrt(1/2). Use polar
+	# angle t from the x axis and azimuth f, so a point is
+	# (cos t, sin t cos f, sin t sin f) and its area element is sin t dt df.
+	# The interior is t in [0, pi/2] and f in [pi/4, 3pi/2], plus t in
+	# [pi/2, pi] and f in [pi/4, pi]. The integral of position is then
+	# (pi/4) * (1, -(1 + 2h), 1 + 2h).
+	h = 0.7071067811865476
+	loop = S2Loop.from_points([
+		S2Point.new(1.0, 0.0, 0.0),
+		S2Point.new(0.0, h, h),
+		S2Point.new(-1.0, 0.0, 0.0),
+		S2Point.new(0.0, -1.0, 0.0),
+		S2Point.new(0.0, 0.0, -1.0),
+	])
+	k = F64.pi / 4.0 * (1.0 + 2.0 * h)
+	loop.centroid().approx_eq(S2Point.new(F64.pi / 4.0, -k, k), 1e-12)
 }

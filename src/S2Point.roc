@@ -8,6 +8,7 @@ import Internal/S2Math
 ## results such as cross products can be held in it unnormalized.
 S2Point := { x : F64, y : F64, z : F64 }.{
 
+	## The point with the given coordinates. The length is not checked.
 	new : F64, F64, F64 -> S2Point
 	new = |x, y, z| { x: x, y: y, z: z }
 
@@ -24,12 +25,15 @@ S2Point := { x : F64, y : F64, z : F64 }.{
 		z: 0.99994664350250195,
 	}
 
+	## The x coordinate.
 	x : S2Point -> F64
 	x = |p| p.x
 
+	## The y coordinate.
 	y : S2Point -> F64
 	y = |p| p.y
 
+	## The z coordinate.
 	z : S2Point -> F64
 	z = |p| p.z
 
@@ -55,9 +59,11 @@ S2Point := { x : F64, y : F64, z : F64 }.{
 			{ x: p.x, y: p.y, z: v }
 		}
 
+	## Adds the coordinates. Written `a + b`.
 	plus : S2Point, S2Point -> S2Point
 	plus = |a, b| { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }
 
+	## Subtracts the coordinates of `b` from those of `a`. Written `a - b`.
 	minus : S2Point, S2Point -> S2Point
 	minus = |a, b| { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }
 
@@ -65,9 +71,12 @@ S2Point := { x : F64, y : F64, z : F64 }.{
 	times : S2Point, F64 -> S2Point
 	times = |p, k| { x: p.x * k, y: p.y * k, z: p.z * k }
 
+	## Divides every coordinate by `k`. Written `p / k`.
 	div_by : S2Point, F64 -> S2Point
 	div_by = |p, k| { x: p.x / k, y: p.y / k, z: p.z / k }
 
+	## The point with every coordinate negated, which is the antipode of a unit
+	## vector. Written `-p`.
 	negate : S2Point -> S2Point
 	negate = |p| { x: -p.x, y: -p.y, z: -p.z }
 
@@ -75,9 +84,12 @@ S2Point := { x : F64, y : F64, z : F64 }.{
 	abs : S2Point -> S2Point
 	abs = |p| { x: p.x.abs(), y: p.y.abs(), z: p.z.abs() }
 
+	## The dot product of the two points, taken as vectors.
 	dot : S2Point, S2Point -> F64
 	dot = |a, b| a.x * b.x + a.y * b.y + a.z * b.z
 
+	## The cross product of the two points, taken as vectors. It is the zero
+	## vector when they are parallel.
 	cross : S2Point, S2Point -> S2Point
 	cross = |a, b| {
 		x: a.y * b.z - a.z * b.y,
@@ -85,9 +97,11 @@ S2Point := { x : F64, y : F64, z : F64 }.{
 		z: a.x * b.y - a.y * b.x,
 	}
 
+	## The squared length of the point, taken as a vector.
 	norm2 : S2Point -> F64
 	norm2 = |p| p.x * p.x + p.y * p.y + p.z * p.z
 
+	## The length of the point, taken as a vector.
 	norm : S2Point -> F64
 	norm = |p| p.norm2().sqrt()
 

@@ -48,9 +48,12 @@ S1Interval := { lo : F64, hi : F64 }.{
 		}
 	}
 
+	## The start of the interval, in radians in `[-pi, pi]`.
 	lo : S1Interval -> F64
 	lo = |i| i.lo
 
+	## The end of the interval, in radians in `[-pi, pi]`. It is less than `lo`
+	## when the interval wraps through the +/-pi boundary.
 	hi : S1Interval -> F64
 	hi = |i| i.hi
 
@@ -62,9 +65,11 @@ S1Interval := { lo : F64, hi : F64 }.{
 	is_inverted : S1Interval -> Bool
 	is_inverted = |i| i.lo > i.hi
 
+	## True when the interval contains no point.
 	is_empty : S1Interval -> Bool
 	is_empty = |i| i.lo - i.hi == 2.0 * F64.pi
 
+	## True when the interval is the whole circle.
 	is_full : S1Interval -> Bool
 	is_full = |i| i.hi - i.lo == 2.0 * F64.pi
 
@@ -116,12 +121,17 @@ S1Interval := { lo : F64, hi : F64 }.{
 			p >= i.lo and p <= i.hi
 		}
 
+	## True when the point is in the interval. The points `-pi` and `pi` are
+	## the same point. The point must be in `[-pi, pi]`.
 	contains_point : S1Interval, F64 -> Bool
 	contains_point = |i, p| {
 		q = if (p == -F64.pi) F64.pi else p
 		i.fast_contains_point(q)
 	}
 
+	## True when the point is in the interval and not at an end of it. The
+	## points `-pi` and `pi` are the same point. The full interval contains
+	## every point.
 	interior_contains_point : S1Interval, F64 -> Bool
 	interior_contains_point = |i, p| {
 		q = if (p == -F64.pi) F64.pi else p
@@ -132,6 +142,8 @@ S1Interval := { lo : F64, hi : F64 }.{
 		}
 	}
 
+	## True when every point of `other` is in this interval. Every interval
+	## contains an empty interval.
 	contains_interval : S1Interval, S1Interval -> Bool
 	contains_interval = |i, other|
 		if i.is_inverted() {
@@ -146,6 +158,8 @@ S1Interval := { lo : F64, hi : F64 }.{
 			other.lo >= i.lo and other.hi <= i.hi
 		}
 
+	## True when every point of `other` is in this interval and none is at an
+	## end of it. Every interval contains an empty interval.
 	interior_contains_interval : S1Interval, S1Interval -> Bool
 	interior_contains_interval = |i, other|
 		if i.is_inverted() {
@@ -160,6 +174,8 @@ S1Interval := { lo : F64, hi : F64 }.{
 			(other.lo > i.lo and other.hi < i.hi) or i.is_full()
 		}
 
+	## True when the two intervals share at least one point. An empty interval
+	## shares no point.
 	intersects : S1Interval, S1Interval -> Bool
 	intersects = |i, other| {
 		if i.is_empty() or other.is_empty() {
@@ -174,6 +190,8 @@ S1Interval := { lo : F64, hi : F64 }.{
 		}
 	}
 
+	## True when the interior of this interval shares at least one point with
+	## `other`. A single point has no interior, and an empty interval has none.
 	interior_intersects : S1Interval, S1Interval -> Bool
 	interior_intersects = |i, other| {
 		if i.is_empty() or other.is_empty() or i.lo == i.hi {

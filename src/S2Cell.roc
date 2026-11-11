@@ -61,16 +61,22 @@ S2Cell := { id : S2CellId, face : U64, level : U64, orientation : U64, uv : R2Re
 	from_face : U64 -> S2Cell
 	from_face = |face_index| S2Cell.from_cell_id(S2CellId.from_face(face_index))
 
+	## The cell at `level` whose Hilbert curve position on `face_index` is
+	## `position`.
 	from_face_pos_level : U64, U64, U64 -> S2Cell
 	from_face_pos_level = |face_index, position, target_level|
 		S2Cell.from_cell_id(S2CellId.from_face_pos_level(face_index, position, target_level))
 
+	## The id of the cell.
 	id : S2Cell -> S2CellId
 	id = |cell| cell.id
 
+	## The cube face of the cell, in `[0, 5]`.
 	face : S2Cell -> U64
 	face = |cell| cell.face
 
+	## The subdivision level of the cell. Level 0 is a whole face and level 30
+	## is a leaf cell.
 	level : S2Cell -> U64
 	level = |cell| cell.level
 
@@ -79,6 +85,7 @@ S2Cell := { id : S2CellId, face : U64, level : U64, orientation : U64, uv : R2Re
 	orientation : S2Cell -> U64
 	orientation = |cell| cell.orientation
 
+	## True when the cell is at level 30, the finest level.
 	is_leaf : S2Cell -> Bool
 	is_leaf = |cell| cell.level == S2CellId.max_level
 

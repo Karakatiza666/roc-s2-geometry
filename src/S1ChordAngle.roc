@@ -43,6 +43,7 @@ S1ChordAngle := { length2 : F64 }.{
 	from_points : S2Point, S2Point -> S1ChordAngle
 	from_points = |a, b| { length2: (a - b).norm2().min(4.0) }
 
+	## The zero angle.
 	zero : () -> S1ChordAngle
 	zero = || { length2: 0.0 }
 
@@ -79,18 +80,24 @@ S1ChordAngle := { length2 : F64 }.{
 		}
 	}
 
+	## The angle in radians.
 	radians : S1ChordAngle -> F64
 	radians = |c| c.to_angle().radians()
 
+	## The angle in degrees.
 	degrees : S1ChordAngle -> F64
 	degrees = |c| c.to_angle().degrees()
 
+	## True when the squared chord length is exactly zero.
 	is_zero : S1ChordAngle -> Bool
 	is_zero = |c| c.length2 == 0.0
 
+	## True for the negative sentinel and for any other negative squared
+	## length.
 	is_negative : S1ChordAngle -> Bool
 	is_negative = |c| c.length2 < 0.0
 
+	## True for the infinity sentinel.
 	is_infinity : S1ChordAngle -> Bool
 	is_infinity = |c| c.length2 == F64.infinity
 
@@ -106,12 +113,15 @@ S1ChordAngle := { length2 : F64 }.{
 	sin2 : S1ChordAngle -> F64
 	sin2 = |c| c.length2 * (1.0 - 0.25 * c.length2)
 
+	## The sine of the angle.
 	sin : S1ChordAngle -> F64
 	sin = |c| c.sin2().sqrt()
 
+	## The cosine of the angle.
 	cos : S1ChordAngle -> F64
 	cos = |c| 1.0 - 0.5 * c.length2
 
+	## The tangent of the angle. It is infinite at 90 degrees.
 	tan : S1ChordAngle -> F64
 	tan = |c| c.sin() / c.cos()
 
@@ -204,9 +214,11 @@ S1ChordAngle := { length2 : F64 }.{
 	is_gte : S1ChordAngle, S1ChordAngle -> Bool
 	is_gte = |a, b| a.length2 >= b.length2
 
+	## The smaller of the two angles.
 	min : S1ChordAngle, S1ChordAngle -> S1ChordAngle
 	min = |a, b| if (a.length2 <= b.length2) a else b
 
+	## The larger of the two angles.
 	max : S1ChordAngle, S1ChordAngle -> S1ChordAngle
 	max = |a, b| if (a.length2 >= b.length2) a else b
 

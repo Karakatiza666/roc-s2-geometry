@@ -2,15 +2,19 @@
 ## cube face.
 R2Point := { x : F64, y : F64 }.{
 
+	## The point with the given `x` and `y` coordinates.
 	new : F64, F64 -> R2Point
 	new = |x, y| { x: x, y: y }
 
+	## The point `(0, 0)`.
 	origin : () -> R2Point
 	origin = || { x: 0.0, y: 0.0 }
 
+	## The x coordinate.
 	x : R2Point -> F64
 	x = |p| p.x
 
+	## The y coordinate.
 	y : R2Point -> F64
 	y = |p| p.y
 
@@ -18,9 +22,11 @@ R2Point := { x : F64, y : F64 }.{
 	coord : R2Point, U64 -> F64
 	coord = |p, k| if (k == 0) p.x else p.y
 
+	## Adds the coordinates. Written `a + b`.
 	plus : R2Point, R2Point -> R2Point
 	plus = |a, b| { x: a.x + b.x, y: a.y + b.y }
 
+	## Subtracts the coordinates of `b` from those of `a`. Written `a - b`.
 	minus : R2Point, R2Point -> R2Point
 	minus = |a, b| { x: a.x - b.x, y: a.y - b.y }
 
@@ -28,12 +34,15 @@ R2Point := { x : F64, y : F64 }.{
 	times : R2Point, F64 -> R2Point
 	times = |p, k| { x: p.x * k, y: p.y * k }
 
+	## Divides both coordinates by `k`. Written `p / k`.
 	div_by : R2Point, F64 -> R2Point
 	div_by = |p, k| { x: p.x / k, y: p.y / k }
 
+	## The point with both coordinates negated. Written `-p`.
 	negate : R2Point -> R2Point
 	negate = |p| { x: -p.x, y: -p.y }
 
+	## The dot product of the two points, taken as vectors.
 	dot : R2Point, R2Point -> F64
 	dot = |a, b| a.x * b.x + a.y * b.y
 
@@ -42,9 +51,11 @@ R2Point := { x : F64, y : F64 }.{
 	cross : R2Point, R2Point -> F64
 	cross = |a, b| a.x * b.y - a.y * b.x
 
+	## The squared length of the point, taken as a vector.
 	norm2 : R2Point -> F64
 	norm2 = |p| p.x * p.x + p.y * p.y
 
+	## The length of the point, taken as a vector.
 	norm : R2Point -> F64
 	norm = |p| p.norm2().sqrt()
 

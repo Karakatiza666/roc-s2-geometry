@@ -56,9 +56,11 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 	from_center_size : S2LatLng, S2LatLng -> S2LatLngRect
 	from_center_size = |center, size| S2LatLngRect.from_point(center).expanded(size * 0.5)
 
+	## The rectangle that contains no position.
 	empty : () -> S2LatLngRect
 	empty = || { lat: R1Interval.empty(), lng: S1Interval.empty() }
 
+	## The rectangle that contains every position.
 	full : () -> S2LatLngRect
 	full = || { lat: S2LatLngRect.full_lat(), lng: S1Interval.full() }
 
@@ -171,21 +173,29 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 		}
 	}
 
+	## The interval of latitudes, in radians.
 	lat : S2LatLngRect -> R1Interval
 	lat = |r| r.lat
 
+	## The interval of longitudes, in radians. It wraps through +/-pi when it
+	## is inverted.
 	lng : S2LatLngRect -> S1Interval
 	lng = |r| r.lng
 
+	## The lowest latitude.
 	lat_lo : S2LatLngRect -> S1Angle
 	lat_lo = |r| S1Angle.from_radians(r.lat.lo())
 
+	## The highest latitude.
 	lat_hi : S2LatLngRect -> S1Angle
 	lat_hi = |r| S1Angle.from_radians(r.lat.hi())
 
+	## The longitude where the rectangle starts. It is greater than `lng_hi`
+	## when the rectangle wraps through +/-pi.
 	lng_lo : S2LatLngRect -> S1Angle
 	lng_lo = |r| S1Angle.from_radians(r.lng.lo())
 
+	## The longitude where the rectangle ends.
 	lng_hi : S2LatLngRect -> S1Angle
 	lng_hi = |r| S1Angle.from_radians(r.lng.hi())
 
@@ -206,15 +216,19 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 			and r.lng.is_valid()
 			and r.lat.is_empty() == r.lng.is_empty()
 
+	## True when the rectangle contains no position.
 	is_empty : S2LatLngRect -> Bool
 	is_empty = |r| r.lat.is_empty()
 
+	## True when the rectangle covers every latitude and every longitude.
 	is_full : S2LatLngRect -> Bool
 	is_full = |r| r.lat == S2LatLngRect.full_lat() and r.lng.is_full()
 
+	## True when the rectangle is a single position.
 	is_point : S2LatLngRect -> Bool
 	is_point = |r| r.lat.lo() == r.lat.hi() and r.lng.lo() == r.lng.hi()
 
+	## The center of the rectangle. Undefined for an empty rectangle.
 	center : S2LatLngRect -> S2LatLng
 	center = |r| S2LatLng.from_radians(r.lat.center(), r.lng.center())
 
@@ -238,40 +252,54 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 			r.lng.length() * (r.lat.hi().sin() - r.lat.lo().sin())
 		}
 
+	## True when the position is in the rectangle or on its boundary.
 	contains_lat_lng : S2LatLngRect, S2LatLng -> Bool
 	contains_lat_lng = |r, ll|
 		r.lat.contains_point(ll.lat_radians()) and r.lng.contains_point(ll.lng_radians())
 
+	## True when the point is in the rectangle or on its boundary.
 	contains_point : S2LatLngRect, S2Point -> Bool
 	contains_point = |r, p| r.contains_lat_lng(S2LatLng.from_point(p))
 
+	## True when the position is strictly inside the rectangle.
 	interior_contains_lat_lng : S2LatLngRect, S2LatLng -> Bool
 	interior_contains_lat_lng = |r, ll|
 		r.lat.interior_contains_point(ll.lat_radians())
 			and r.lng.interior_contains_point(ll.lng_radians())
 
+	## True when the point is strictly inside the rectangle.
 	interior_contains_point : S2LatLngRect, S2Point -> Bool
 	interior_contains_point = |r, p| r.interior_contains_lat_lng(S2LatLng.from_point(p))
 
+	## True when every position of `other` is in this rectangle. Every
+	## rectangle contains an empty rectangle.
 	contains_rect : S2LatLngRect, S2LatLngRect -> Bool
 	contains_rect = |r, other|
 		r.lat.contains_interval(other.lat) and r.lng.contains_interval(other.lng)
 
+	## True when every position of `other` is strictly inside this rectangle.
+	## Every rectangle contains an empty rectangle.
 	interior_contains_rect : S2LatLngRect, S2LatLngRect -> Bool
 	interior_contains_rect = |r, other|
 		r.lat.interior_contains_interval(other.lat)
 			and r.lng.interior_contains_interval(other.lng)
 
+	## True when the two rectangles share at least one position.
 	intersects_rect : S2LatLngRect, S2LatLngRect -> Bool
 	intersects_rect = |r, other| r.lat.intersects(other.lat) and r.lng.intersects(other.lng)
 
+	## True when the interior of this rectangle shares at least one position
+	## with `other`.
 	interior_intersects_rect : S2LatLngRect, S2LatLngRect -> Bool
 	interior_intersects_rect = |r, other|
 		r.lat.interior_intersects(other.lat) and r.lng.interior_intersects(other.lng)
 
+	## The smallest rectangle that contains both rectangles.
 	union : S2LatLngRect, S2LatLngRect -> S2LatLngRect
 	union = |r, other| { lat: r.lat.union(other.lat), lng: r.lng.union(other.lng) }
 
+	## The largest rectangle in both rectangles. The result is empty when they
+	## do not overlap.
 	intersection : S2LatLngRect, S2LatLngRect -> S2LatLngRect
 	intersection = |r, other| {
 		new_lat = r.lat.intersection(other.lat)
@@ -290,6 +318,7 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 		lng: r.lng.add_point(ll.lng_radians()),
 	}
 
+	## The smallest rectangle that contains this rectangle and the point.
 	add_point : S2LatLngRect, S2Point -> S2LatLngRect
 	add_point = |r, p| r.add_lat_lng(S2LatLng.from_point(p))
 
@@ -482,6 +511,8 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 		$hit
 	}
 
+	## True when the latitude and longitude intervals are each within
+	## `max_error` of the other rectangle.
 	approx_eq : S2LatLngRect, S2LatLngRect, F64 -> Bool
 	approx_eq = |r, other, max_error|
 		r.lat.approx_eq(other.lat, max_error) and r.lng.approx_eq(other.lng, max_error)

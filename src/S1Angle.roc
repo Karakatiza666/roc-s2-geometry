@@ -76,9 +76,11 @@ S1Angle := { radians : F64 }.{
 	is_finite : S1Angle -> Bool
 	is_finite = |a| a.radians.is_finite()
 
+	## Adds the angles. Written `a + b`.
 	plus : S1Angle, S1Angle -> S1Angle
 	plus = |a, b| { radians: a.radians + b.radians }
 
+	## Subtracts `b` from `a`. Written `a - b`.
 	minus : S1Angle, S1Angle -> S1Angle
 	minus = |a, b| { radians: a.radians - b.radians }
 
@@ -90,6 +92,7 @@ S1Angle := { radians : F64 }.{
 	div_by : S1Angle, F64 -> S1Angle
 	div_by = |a, k| { radians: a.radians / k }
 
+	## The angle with its sign reversed. Written `-a`.
 	negate : S1Angle -> S1Angle
 	negate = |a| { radians: -a.radians }
 

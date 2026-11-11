@@ -64,15 +64,19 @@ S2RegionCoverer := { min_level : U64, max_level : U64, level_mod : U64, max_cell
 	with_level_mod : S2RegionCoverer, U64 -> S2RegionCoverer
 	with_level_mod = |coverer, level_mod| { ..coverer, level_mod: level_mod.max(1).min(3) }
 
+	## The coarsest level any cell of the covering may have.
 	min_level : S2RegionCoverer -> U64
 	min_level = |coverer| coverer.min_level
 
+	## The finest level any cell of the covering may have.
 	max_level : S2RegionCoverer -> U64
 	max_level = |coverer| coverer.max_level
 
+	## The step between allowed levels. A value of 1 allows every level.
 	level_mod : S2RegionCoverer -> U64
 	level_mod = |coverer| coverer.level_mod
 
+	## The cell budget of the covering.
 	max_cells : S2RegionCoverer -> U64
 	max_cells = |coverer| coverer.max_cells
 
