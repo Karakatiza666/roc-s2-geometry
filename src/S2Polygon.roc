@@ -1,5 +1,9 @@
+import S1Angle
+import S1ChordAngle
 import S2Cap
 import S2Cell
+import S2CellId
+import S2Edge
 import S2LatLng
 import S2LatLngRect
 import S2Loop
@@ -80,6 +84,11 @@ S2Polygon := { loops : List(Nested), bound : S2LatLngRect, inconsistent_orientat
 	from_loop : S2Loop -> S2Polygon
 	from_loop = |boundary| S2Polygon.from_loops([boundary])
 
+	## The polygon bounded by the loop through the cell's four vertices,
+	## `S2Loop.from_cell`. Upstream's `S2Polygon(const S2Cell&)`.
+	from_cell : S2Cell -> S2Polygon
+	from_cell = |cell| S2Polygon.from_loop(S2Loop.from_cell(cell))
+
 	## The polygon containing nothing.
 	empty : () -> S2Polygon
 	empty = || { loops: [], bound: S2LatLngRect.empty(), inconsistent_orientations: Bool.False }
@@ -118,6 +127,58 @@ S2Polygon := { loops : List(Nested), bound : S2LatLngRect, inconsistent_orientat
 	## True when the loop bounds a hole rather than a shell.
 	is_hole : Nested -> Bool
 	is_hole = |entry| entry.depth % 2 == 1
+
+	## The `i`-th vertex of the loop, in the order that keeps the polygon's
+	## interior on the left: reversed for a hole. Upstream's
+	## `S2Loop::oriented_vertex`, which is on the loop there because an
+	## upstream loop knows its depth.
+	##
+	## For a hole of `n` vertices, `0, 1, 2` give vertices `n - 1, n - 2,
+	## n - 3`. The index wraps, as in `S2Loop.vertex`.
+	oriented_vertex : Nested, U64 -> S2Point
+	oriented_vertex = |entry, index| {
+		n = entry.boundary.num_vertices()
+		if n == 0 {
+			return S2Point.zero()
+		}
+		j = index % n
+		entry.boundary.vertex(if (S2Polygon.is_hole(entry)) n - 1 - j else j)
+	}
+
+	## The total number of vertices of all the loops. Upstream's
+	## `num_vertices`: the full polygon has one, its full loop's marker.
+	num_vertices : S2Polygon -> U64
+	num_vertices = |polygon| polygon.loops.fold(0, |acc, entry| acc + entry.boundary.num_vertices())
+
+	## The index of the loop that directly contains loop `k`, or `NoParent`
+	## for a loop at depth 0. Upstream's `GetParent`.
+	parent : S2Polygon, U64 -> Try(U64, [NoParent])
+	parent = |polygon, k| {
+		depth = polygon.depth_at(k)
+		if depth == 0 {
+			return Err(NoParent)
+		}
+		var $i = k
+		while $i > 0 {
+			$i = $i - 1
+			if polygon.depth_at($i) < depth {
+				return Ok($i)
+			}
+		}
+		Err(NoParent)
+	}
+
+	## The index of the last loop nested inside loop `k`, or `k` itself
+	## when nothing is. Loops `k` through the result are loop `k` and all
+	## its descendants. Upstream's `GetLastDescendant` for `k >= 0`.
+	last_descendant : S2Polygon, U64 -> U64
+	last_descendant = |polygon, k| last_descendant_of(polygon.loops.map(|entry| entry.depth), k)
+
+	## The level of the cells whose centres all the vertices are, or
+	## `NotSnapped` when there is no such level or no vertex. Upstream's
+	## `GetSnapLevel`.
+	snap_level : S2Polygon -> Try(U64, [NotSnapped])
+	snap_level = |polygon| S2Boundary.snap_level(polygon.loops.join_map(|entry| entry.boundary.vertices()))
 
 	## True when the polygon has no loop.
 	is_empty : S2Polygon -> Bool
@@ -217,7 +278,7 @@ S2Polygon := { loops : List(Nested), bound : S2LatLngRect, inconsistent_orientat
 		# And they must match what contains what.
 		var $outer = 0
 		while $outer < n {
-			last = last_descendant(depths, $outer)
+			last = last_descendant_of(depths, $outer)
 			var $inner = 0
 			while $inner < n {
 				if $inner != $outer {
@@ -280,6 +341,127 @@ S2Polygon := { loops : List(Nested), bound : S2LatLngRect, inconsistent_orientat
 		$total
 	}
 
+	## The distance from `x` to the polygon: zero when the polygon contains
+	## `x`, otherwise the distance to its boundary. The empty polygon gives
+	## `S1Angle.infinity()`. Upstream's `S2Polygon::GetDistance`.
+	##
+	## Upstream finds the nearest edge with its closest-edge query. This port
+	## scans every edge, so the cost is linear in the vertex count.
+	distance_to_point : S2Polygon, S2Point -> S1Angle
+	distance_to_point = |polygon, x|
+		if polygon.contains_point(x) {
+			S1Angle.zero()
+		} else {
+			polygon.distance_to_boundary(x)
+		}
+
+	## The distance from `x` to the nearest point of the polygon's edges.
+	## The empty and full polygons have no boundary, so they give
+	## `S1Angle.infinity()`. Upstream's `GetDistanceToBoundary`. The cost is
+	## linear in the vertex count.
+	distance_to_boundary : S2Polygon, S2Point -> S1Angle
+	distance_to_boundary = |polygon, x|
+		match closest_edge(polygon, x) {
+			Ok(edge) => edge.distance.to_angle()
+			Err(NoEdges) => S1Angle.infinity()
+		}
+
+	## `x` itself when the polygon contains it, otherwise the nearest point
+	## of the polygon's boundary. The empty polygon gives `x`. Upstream's
+	## `S2Polygon::Project`.
+	project : S2Polygon, S2Point -> S2Point
+	project = |polygon, x|
+		if polygon.contains_point(x) {
+			x
+		} else {
+			polygon.project_to_boundary(x)
+		}
+
+	## The nearest point of the polygon's boundary to `x`. The empty and
+	## full polygons have no boundary, so they give `x`. Upstream's
+	## `ProjectToBoundary`. The cost is linear in the vertex count.
+	project_to_boundary : S2Polygon, S2Point -> S2Point
+	project_to_boundary = |polygon, x|
+		match closest_edge(polygon, x) {
+			Ok(edge) => S2Edge.project(x, edge.v0, edge.v1)
+			Err(NoEdges) => x
+		}
+
+	## The complement of the polygon: every point it does not contain, and
+	## the same boundary. Upstream's `Invert`, which `InitToComplement` also
+	## uses.
+	##
+	## The empty polygon becomes full and the full polygon empty. Otherwise
+	## the shell at depth 0 with the largest area is inverted. Its former
+	## siblings go one level deeper, and its former descendants one level
+	## up. Ties between shells are broken by their vertices, so the loop
+	## order of the input does not matter.
+	invert : S2Polygon -> S2Polygon
+	invert = |polygon| {
+		if polygon.is_empty() {
+			return S2Polygon.full()
+		}
+		var $k = 0
+		var $tracked = []
+		for entry in polygon.loops {
+			$tracked = $tracked.append({ index: $k, boundary: entry.boundary, depth: entry.depth })
+			$k = $k + 1
+		}
+		inverted = invert_nested($tracked)
+		assemble(inverted.map(|entry| { boundary: entry.boundary, depth: entry.depth }), polygon.inconsistent_orientations)
+	}
+
+	## The complement of the polygon, the same as `invert`. Upstream's
+	## `InitToComplement`.
+	complement : S2Polygon -> S2Polygon
+	complement = |polygon| polygon.invert()
+
+	## True when no hole or shell shares more than one vertex with the loop
+	## that directly contains it. Upstream's `IsNormalized`.
+	##
+	## Upstream notes that this is a weaker test than it should be: a
+	## connected group of child loops should share at most one vertex with
+	## their parent. Each child is compared with the vertices of its parent,
+	## so the cost is the product of their vertex counts.
+	is_normalized : S2Polygon -> Bool
+	is_normalized = |polygon| {
+		var $k = 0
+		while $k < polygon.loops.len() {
+			match polygon.parent($k) {
+				Ok(p) => {
+					parent_vertices = polygon.loop_at(p).vertices()
+					count = polygon.loop_at($k).vertices().count_if(|v| parent_vertices.contains(v))
+					if count > 1 {
+						return Bool.False
+					}
+				}
+				Err(NoParent) => {}
+			}
+			$k = $k + 1
+		}
+		Bool.True
+	}
+
+	## True when for each loop of this polygon the other has a loop at the
+	## same depth with the same boundary, as `S2Loop.boundary_equals`
+	## decides, and the two have the same number of loops. Upstream's
+	## `BoundaryEquals`. The loops may be in any order.
+	boundary_equals : S2Polygon, S2Polygon -> Bool
+	boundary_equals = |polygon, other|
+		match_loops(polygon, other, |a, b| a.boundary_equals(b))
+
+	## Like `boundary_equals`, with each pair of loops compared by
+	## `S2Loop.boundary_approx_equals`. Upstream's `BoundaryApproxEquals`.
+	boundary_approx_equals : S2Polygon, S2Polygon, S1Angle -> Bool
+	boundary_approx_equals = |polygon, other, max_error|
+		match_loops(polygon, other, |a, b| b.boundary_approx_equals(a, max_error))
+
+	## Like `boundary_equals`, with each pair of loops compared by
+	## `S2Loop.boundary_near`. Upstream's `BoundaryNear`.
+	boundary_near : S2Polygon, S2Polygon, S1Angle -> Bool
+	boundary_near = |polygon, other, max_error|
+		match_loops(polygon, other, |a, b| b.boundary_near(a, max_error))
+
 	## The bounding rectangle of the polygon, which bounds its shells.
 	rect_bound : S2Polygon -> S2LatLngRect
 	rect_bound = |polygon| polygon.bound
@@ -287,6 +469,15 @@ S2Polygon := { loops : List(Nested), bound : S2LatLngRect, inconsistent_orientat
 	## The bounding cap of the polygon.
 	cap_bound : S2Polygon -> S2Cap
 	cap_bound = |polygon| polygon.bound.cap_bound()
+
+	## A few cells that cover the polygon: those of its bounding cap.
+	##
+	## Upstream's `S2Polygon::GetCellUnionBound` takes the cells of its
+	## spatial index instead, which this port does not have. So the
+	## covering that `S2RegionCoverer` finds for a polygon can differ from
+	## upstream's.
+	cell_union_bound : S2Polygon -> List(S2CellId)
+	cell_union_bound = |polygon| polygon.cap_bound().cell_union_bound()
 
 	## True when the polygon contains every point of the cell.
 	##
@@ -389,6 +580,37 @@ S2Polygon := { loops : List(Nested), bound : S2LatLngRect, inconsistent_orientat
 	to_inspect = |polygon| "S2Polygon(${polygon.loops.len().to_str()} loops)"
 }
 
+## The edge nearest to `x`, with each loop oriented as `oriented_vertex`
+## orients it, as upstream's spatial index holds the edges. The full loop has
+## no edges.
+closest_edge : S2Polygon, S2Point -> Try({ distance : S1ChordAngle, v0 : S2Point, v1 : S2Point }, [NoEdges])
+closest_edge = |polygon, x| {
+	chains =
+		polygon.loops
+			.keep_if(|entry| !entry.boundary.is_empty_or_full())
+			.map(
+				|entry| if S2Polygon.is_hole(entry) {
+					entry.boundary.vertices().rev()
+				} else {
+					entry.boundary.vertices()
+				},
+			)
+	S2Boundary.closest_edge(chains, x)
+}
+
+## True when the polygons have the same number of loops and each loop of the
+## first has a partner in the second at the same depth for which `same`
+## holds. As upstream assumes, there is at most one candidate partner.
+match_loops : S2Polygon, S2Polygon, (S2Loop, S2Loop -> Bool) -> Bool
+match_loops = |polygon, other, same| {
+	if polygon.loops.len() != other.loops.len() {
+		return Bool.False
+	}
+	polygon.loops.all(
+		|a| other.loops.any(|b| b.depth == a.depth and same(a.boundary, b.boundary)),
+	)
+}
+
 ## The polygon with the given loops, already in preorder, and its bound:
 ## the union of the bounds of its shells at depth 0.
 assemble : List(S2Polygon.Nested), Bool -> S2Polygon
@@ -452,8 +674,8 @@ preorder = |children, node, depth, acc| {
 
 ## The index of the last loop nested inside loop `k`, given the depths of
 ## loops in preorder. That is `k` itself when nothing is nested inside it.
-last_descendant : List(U64), U64 -> U64
-last_descendant = |depths, k| {
+last_descendant_of : List(U64), U64 -> U64
+last_descendant_of = |depths, k| {
 	depth = depths.get(k) ?? 0
 	var $last = k
 	while $last + 1 < depths.len() and (depths.get($last + 1) ?? 0) > depth {
@@ -552,7 +774,7 @@ invert_nested = |loops| {
 		$i = $i + 1
 	}
 	best = $best
-	last = last_descendant(loops.map(|entry| entry.depth), best)
+	last = last_descendant_of(loops.map(|entry| entry.depth), best)
 	chosen = at(best)
 	var $result = [{ index: chosen.index, boundary: chosen.boundary.invert(), depth: chosen.depth }]
 	var $k = 0
@@ -855,4 +1077,147 @@ sign_of = |entry| if S2Polygon.is_hole(entry) {
 	-1.0
 } else {
 	1.0
+}
+
+# Upstream's S2PolygonTestBase.GetDistance: two nested rectangles around (0, 0),
+# so the inner one is a hole. Points outside that project to an edge and to
+# a vertex, inside that project to an outer edge and an inner vertex, in the
+# hole, and on the boundary; then the empty and full polygons. Distances in
+# radians, then Project and ProjectToBoundary, all from upstream.
+expect {
+	nested = S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(3.0, 1.0), S2LatLng.from_degrees(3.0, -1.0), S2LatLng.from_degrees(-3.0, -1.0), S2LatLng.from_degrees(-3.0, 1.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(4.0, 2.0), S2LatLng.from_degrees(4.0, -2.0), S2LatLng.from_degrees(-4.0, -2.0), S2LatLng.from_degrees(-4.0, 2.0)])])
+	check = |polygon, x, expected| {
+		(distance, boundary, projected, on_boundary) = expected
+		polygon.distance_to_point(x).radians() == distance
+			and polygon.distance_to_boundary(x).radians() == boundary
+			and polygon.project(x) == projected
+			and polygon.project_to_boundary(x) == on_boundary
+	}
+	y = S2Point.new(0.0, 1.0, 0.0)
+	inf = S1Angle.infinity().radians()
+	check(nested, S2LatLng.from_degrees(0.0, -4.7).to_point(), (0.047123889803846908, 0.047123889803846908, S2Point.new(0.99939082701909576, -0.034899496702500969, 0.0), S2Point.new(0.99939082701909576, -0.034899496702500969, 0.0)))
+		and check(nested, S2LatLng.from_degrees(6.0, -3.0).to_point(), (0.038996688676648301, 0.038996688676648301, S2Point.new(0.99695636119368447, -0.034814483282576247, 0.069756473744125302), S2Point.new(0.99695636119368447, -0.034814483282576247, 0.069756473744125302)))
+		and check(nested, S2LatLng.from_degrees(0.0, 1.7).to_point(), (0.0, 0.0052359877559829803, S2Point.new(0.99955986011938402, 0.029666244085110757, 0.0), S2Point.new(0.99939082701909576, 0.034899496702500969, -0.0)))
+		and check(nested, S2LatLng.from_degrees(-3.3, -1.3).to_point(), (0.0, 0.0073992087714004409, S2Point.new(0.99808485273767145, -0.022649713813178974, -0.057564026959567277), S2Point.new(0.99847743863945992, -0.017428488520812163, -0.052335956242943835)))
+		and check(nested, S2LatLng.from_degrees(0.0, 0.1).to_point(), (0.015707963267948963, 0.015707963267948963, S2Point.new(0.99984769515639127, 0.017452406437283512, 0.0), S2Point.new(0.99984769515639127, 0.017452406437283512, 0.0)))
+		and check(nested, S2LatLng.from_degrees(3.0, 1.0).to_point(), (0.0, 0.0, S2Point.new(0.99847743863945992, 0.017428488520812163, 0.052335956242943835), S2Point.new(0.99847743863945992, 0.017428488520812163, 0.052335956242943835)))
+		and check(nested, S2LatLng.from_degrees(0.0, 2.0).to_point(), (0.0, 1.1102230246251565e-16, S2Point.new(0.99939082701909576, 0.034899496702500969, 0.0), S2Point.new(0.99939082701909576, 0.034899496702500969, -0.0)))
+		and check(S2Polygon.empty(), y, (inf, inf, S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 1.0, 0.0)))
+		and check(S2Polygon.full(), y, (0.0, inf, S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 1.0, 0.0)))
+}
+# Upstream's num_vertices, GetSnapLevel, IsNormalized, GetParent and
+# GetLastDescendant for a shell holding a hole holding a shell, beside a
+# second shell; and for a hole that touches its shell at two vertices.
+# From upstream, with -1 for no parent and for no snap level.
+expect {
+	polygon = S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(10.0, 10.0), S2LatLng.from_degrees(10.0, 0.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(2.0, 2.0), S2LatLng.from_degrees(2.0, 8.0), S2LatLng.from_degrees(8.0, 8.0), S2LatLng.from_degrees(8.0, 2.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(4.0, 4.0), S2LatLng.from_degrees(4.0, 6.0), S2LatLng.from_degrees(6.0, 6.0), S2LatLng.from_degrees(6.0, 4.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(20.0, 20.0), S2LatLng.from_degrees(20.0, 21.0), S2LatLng.from_degrees(21.0, 21.0), S2LatLng.from_degrees(21.0, 20.0)])])
+	indices = [0, 1, 2, 3]
+	polygon.num_vertices() == 16
+		and polygon.snap_level() == Err(NotSnapped)
+		and polygon.is_normalized() == Bool.True
+		and indices.map(|k| polygon.depth_at(k)) == [0, 1, 2, 0]
+		and indices.map(|k| polygon.parent(k)) == [Err(NoParent), Ok(0), Ok(1), Err(NoParent)]
+		and indices.map(|k| polygon.last_descendant(k)) == [2, 2, 2, 3]
+}
+expect {
+	polygon = S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 4.0), S2LatLng.from_degrees(4.0, 4.0), S2LatLng.from_degrees(4.0, 0.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(1.0, 3.0), S2LatLng.from_degrees(4.0, 4.0), S2LatLng.from_degrees(3.0, 1.0)])])
+	indices = [0, 1]
+	polygon.num_vertices() == 8
+		and polygon.snap_level() == Err(NotSnapped)
+		and polygon.is_normalized() == Bool.False
+		and indices.map(|k| polygon.depth_at(k)) == [0, 1]
+		and indices.map(|k| polygon.parent(k)) == [Err(NoParent), Ok(0)]
+		and indices.map(|k| polygon.last_descendant(k)) == [1, 1]
+}
+# Upstream's Invert: the depth and vertex count of each loop, and then all
+# the vertices in order, from upstream.
+expect {
+	inverted = S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(10.0, 10.0), S2LatLng.from_degrees(10.0, 0.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(2.0, 2.0), S2LatLng.from_degrees(2.0, 8.0), S2LatLng.from_degrees(8.0, 8.0), S2LatLng.from_degrees(8.0, 2.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(4.0, 4.0), S2LatLng.from_degrees(4.0, 6.0), S2LatLng.from_degrees(6.0, 6.0), S2LatLng.from_degrees(6.0, 4.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(20.0, 20.0), S2LatLng.from_degrees(20.0, 21.0), S2LatLng.from_degrees(21.0, 21.0), S2LatLng.from_degrees(21.0, 20.0)])]).invert()
+	inverted.loops().map(|entry| (entry.depth, entry.boundary.num_vertices())) == [(0, 4), (1, 4), (0, 4), (1, 4)]
+		and inverted.loops().join_map(|entry| entry.boundary.vertices()) == [
+			S2Point.new(0.98480775301220802, 0.0, 0.17364817766693033),
+			S2Point.new(0.9698463103929541, 0.17101007166283433, 0.17364817766693033),
+			S2Point.new(0.98480775301220802, 0.17364817766693033, 0.0),
+			S2Point.new(1.0, 0.0, 0.0),
+			S2Point.new(0.88302222155948906, 0.32139380484326968, 0.34202014332566871),
+			S2Point.new(0.8772786376895817, 0.3367557177138954, 0.34202014332566871),
+			S2Point.new(0.87157241273869712, 0.33456530317942912, 0.35836794954530027),
+			S2Point.new(0.8772786376895817, 0.31930331127661188, 0.35836794954530027),
+			S2Point.new(0.99878202512991221, 0.034878236872062651, 0.034899496702500969),
+			S2Point.new(0.98966482419024082, 0.13908832046729191, 0.034899496702500969),
+			S2Point.new(0.98063084796915956, 0.13781867790849958, 0.13917310096006544),
+			S2Point.new(0.98966482419024082, 0.034559857199638437, 0.13917310096006544),
+			S2Point.new(0.99513403437078507, 0.069586550480032719, 0.069756473744125302),
+			S2Point.new(0.99209929001565178, 0.10427383718471565, 0.069756473744125302),
+			S2Point.new(0.98907380036690273, 0.10395584540887966, 0.10452846326765347),
+			S2Point.new(0.99209929001565178, 0.069374340482214691, 0.10452846326765347),
+		]
+		and S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(10.0, 10.0), S2LatLng.from_degrees(10.0, 0.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(2.0, 2.0), S2LatLng.from_degrees(2.0, 8.0), S2LatLng.from_degrees(8.0, 8.0), S2LatLng.from_degrees(8.0, 2.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(4.0, 4.0), S2LatLng.from_degrees(4.0, 6.0), S2LatLng.from_degrees(6.0, 6.0), S2LatLng.from_degrees(6.0, 4.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(20.0, 20.0), S2LatLng.from_degrees(20.0, 21.0), S2LatLng.from_degrees(21.0, 21.0), S2LatLng.from_degrees(21.0, 20.0)])]).complement() == inverted
+}
+expect {
+	inverted = S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(3.0, 1.0), S2LatLng.from_degrees(3.0, -1.0), S2LatLng.from_degrees(-3.0, -1.0), S2LatLng.from_degrees(-3.0, 1.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(4.0, 2.0), S2LatLng.from_degrees(4.0, -2.0), S2LatLng.from_degrees(-4.0, -2.0), S2LatLng.from_degrees(-4.0, 2.0)])]).invert()
+	inverted.loops().map(|entry| (entry.depth, entry.boundary.num_vertices())) == [(0, 4), (0, 4)]
+		and inverted.loops().join_map(|entry| entry.boundary.vertices()) == [
+			S2Point.new(0.99695636119368447, 0.034814483282576247, -0.069756473744125302),
+			S2Point.new(0.99695636119368447, -0.034814483282576247, -0.069756473744125302),
+			S2Point.new(0.99695636119368447, -0.034814483282576247, 0.069756473744125302),
+			S2Point.new(0.99695636119368447, 0.034814483282576247, 0.069756473744125302),
+			S2Point.new(0.99847743863945992, 0.017428488520812163, 0.052335956242943835),
+			S2Point.new(0.99847743863945992, -0.017428488520812163, 0.052335956242943835),
+			S2Point.new(0.99847743863945992, -0.017428488520812163, -0.052335956242943835),
+			S2Point.new(0.99847743863945992, 0.017428488520812163, -0.052335956242943835),
+		]
+		and S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(3.0, 1.0), S2LatLng.from_degrees(3.0, -1.0), S2LatLng.from_degrees(-3.0, -1.0), S2LatLng.from_degrees(-3.0, 1.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(4.0, 2.0), S2LatLng.from_degrees(4.0, -2.0), S2LatLng.from_degrees(-4.0, -2.0), S2LatLng.from_degrees(-4.0, 2.0)])]).complement() == inverted
+}
+# Upstream inverts the empty polygon to the full one, whose one loop is at
+# depth 0 with one vertex, (0, 0, -1): '0 1 0 0 -1'. The full polygon inverts to
+# the empty one, with no loops.
+expect S2Polygon.empty().invert().is_full() and S2Polygon.full().invert().is_empty()
+# Upstream's BoundaryEquals, BoundaryApproxEquals and BoundaryNear: the same
+# loops in another order and from other starting vertices, a moved vertex,
+# an added vertex on an edge, and a missing hole. From upstream.
+expect {
+	compare = |a, b, degrees| (a.boundary_equals(b), a.boundary_approx_equals(b, S1Angle.from_degrees(degrees)), a.boundary_near(b, S1Angle.from_degrees(degrees)))
+	compare(S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(10.0, 10.0), S2LatLng.from_degrees(10.0, 0.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(2.0, 2.0), S2LatLng.from_degrees(2.0, 8.0), S2LatLng.from_degrees(8.0, 8.0), S2LatLng.from_degrees(8.0, 2.0)])]), S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(2.0, 8.0), S2LatLng.from_degrees(8.0, 8.0), S2LatLng.from_degrees(8.0, 2.0), S2LatLng.from_degrees(2.0, 2.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(10.0, 10.0), S2LatLng.from_degrees(10.0, 0.0), S2LatLng.from_degrees(0.0, 0.0)])]), 0.1) == (Bool.True, Bool.True, Bool.True)
+		and compare(S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(10.0, 10.0), S2LatLng.from_degrees(10.0, 0.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(2.0, 2.0), S2LatLng.from_degrees(2.0, 8.0), S2LatLng.from_degrees(8.0, 8.0), S2LatLng.from_degrees(8.0, 2.0)])]), S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.1), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(10.0, 10.0), S2LatLng.from_degrees(10.0, 0.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(2.0, 2.0), S2LatLng.from_degrees(2.0, 8.0), S2LatLng.from_degrees(8.0, 8.0), S2LatLng.from_degrees(8.0, 2.0)])]), 0.2) == (Bool.False, Bool.True, Bool.True)
+		and compare(S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(10.0, 10.0), S2LatLng.from_degrees(10.0, 0.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(2.0, 2.0), S2LatLng.from_degrees(2.0, 8.0), S2LatLng.from_degrees(8.0, 8.0), S2LatLng.from_degrees(8.0, 2.0)])]), S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.1), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(10.0, 10.0), S2LatLng.from_degrees(10.0, 0.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(2.0, 2.0), S2LatLng.from_degrees(2.0, 8.0), S2LatLng.from_degrees(8.0, 8.0), S2LatLng.from_degrees(8.0, 2.0)])]), 0.05) == (Bool.False, Bool.False, Bool.False)
+		and compare(S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(10.0, 10.0), S2LatLng.from_degrees(10.0, 0.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(2.0, 2.0), S2LatLng.from_degrees(2.0, 8.0), S2LatLng.from_degrees(8.0, 8.0), S2LatLng.from_degrees(8.0, 2.0)])]), S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 5.0), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(10.0, 10.0), S2LatLng.from_degrees(10.0, 0.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(2.0, 2.0), S2LatLng.from_degrees(2.0, 8.0), S2LatLng.from_degrees(8.0, 8.0), S2LatLng.from_degrees(8.0, 2.0)])]), 0.1) == (Bool.False, Bool.False, Bool.True)
+		and compare(S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(10.0, 10.0), S2LatLng.from_degrees(10.0, 0.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(2.0, 2.0), S2LatLng.from_degrees(2.0, 8.0), S2LatLng.from_degrees(8.0, 8.0), S2LatLng.from_degrees(8.0, 2.0)])]), S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(10.0, 10.0), S2LatLng.from_degrees(10.0, 0.0)])]), 0.1) == (Bool.False, Bool.False, Bool.False)
+}
+# Upstream's S2Polygon.TestS2CellConstructorAndContains, without the union.
+expect {
+	cell = S2Cell.from_lat_lng(S2LatLng.from_degrees(40.565459, -74.645276))
+	polygon = S2Polygon.from_cell(cell)
+	copy = S2Polygon.from_loop(S2Loop.from_points(polygon.loop_at(0).vertices()))
+	polygon.num_loops() == 1 and polygon.loop_at(0) == S2Loop.from_cell(cell)
+		and copy.contains_polygon(polygon) and polygon.contains_polygon(copy)
+}
+# Upstream bounds a polygon by the cells of its index; this port uses the
+# cap bound, as for a loop.
+expect {
+	polygon = S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(3.0, 1.0), S2LatLng.from_degrees(3.0, -1.0), S2LatLng.from_degrees(-3.0, -1.0), S2LatLng.from_degrees(-3.0, 1.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(4.0, 2.0), S2LatLng.from_degrees(4.0, -2.0), S2LatLng.from_degrees(-4.0, -2.0), S2LatLng.from_degrees(-4.0, 2.0)])])
+	polygon.cell_union_bound() == polygon.cap_bound().cell_union_bound()
+		and polygon.cell_union_bound() == polygon.loop_at(0).cell_union_bound()
+}
+# oriented_vertex walks a hole backwards.
+expect {
+	polygon = S2Polygon.from_loops([S2Loop.from_lat_lngs([S2LatLng.from_degrees(3.0, 1.0), S2LatLng.from_degrees(3.0, -1.0), S2LatLng.from_degrees(-3.0, -1.0), S2LatLng.from_degrees(-3.0, 1.0)]), S2Loop.from_lat_lngs([S2LatLng.from_degrees(4.0, 2.0), S2LatLng.from_degrees(4.0, -2.0), S2LatLng.from_degrees(-4.0, -2.0), S2LatLng.from_degrees(-4.0, 2.0)])])
+	shell = polygon.loops().get(0) ?? { boundary: S2Loop.empty(), depth: 0 }
+	hole = polygon.loops().get(1) ?? { boundary: S2Loop.empty(), depth: 0 }
+	S2Polygon.oriented_vertex(shell, 1) == shell.boundary.vertex(1)
+		and S2Polygon.oriented_vertex(hole, 0) == hole.boundary.vertex(3)
+		and S2Polygon.oriented_vertex(hole, 1) == hole.boundary.vertex(2)
+		and S2Polygon.oriented_vertex(hole, 5) == hole.boundary.vertex(2)
+}
+
+# Two holes in one shell, from upstream's GetParent and GetLastDescendant:
+# depths 0, 1, 1, parents none, 0, 0, last descendants 2, 1, 2.
+expect {
+	square = |lo, hi| S2Loop.from_lat_lngs([S2LatLng.from_degrees(lo, lo), S2LatLng.from_degrees(lo, hi), S2LatLng.from_degrees(hi, hi), S2LatLng.from_degrees(hi, lo)])
+	polygon = S2Polygon.from_loops([square(0.0, 10.0), square(2.0, 4.0), square(6.0, 8.0)])
+	[0, 1, 2].map(|k| polygon.depth_at(k)) == [0, 1, 1]
+		and [0, 1, 2].map(|k| polygon.parent(k)) == [Err(NoParent), Ok(0), Ok(0)]
+		and [0, 1, 2].map(|k| polygon.last_descendant(k)) == [2, 1, 2]
+		and polygon.num_vertices() == 12
+		and polygon.is_normalized()
 }

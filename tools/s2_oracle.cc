@@ -140,12 +140,54 @@
 //   bounder_ll N LAT_1 LNG_1 ...      GetBound after AddLatLng (radians)
 //   bounder_sub RECT                  ExpandForSubregions
 //   bounder_error                     MaxErrorForTests, lat and lng radians
+//
+// Loops, polylines, polygons and the convex hull. A chain CHAIN is a count
+// N and then N points. A polygon POLY is a loop count and then that many
+// chains, given to the S2Polygon constructor (InitNested). Every shape is
+// built with S2Debug::DISABLE, so invalid ones can be asked about. An error
+// prints as its S2Error code number, then its message.
+//
+//   loop_info CHAIN                   error code or "ok", GetArea
+//                                     S2::GetApproxArea S2::GetPerimeter
+//                                     GetCurvature GetCurvatureMaxError
+//                                     IsNormalized, "|", error message
+//   loop_dist X CHAIN                 GetDistance GetDistanceToBoundary
+//                                     (radians), Project ProjectToBoundary
+//   loop_regular C RADIUS_DEG N       vertices of MakeRegularLoop
+//   loop_cell ID                      vertices of S2Loop(S2Cell), then the
+//                                     loop's GetRectBound as a RECT
+//   loop_near R CHAIN CHAIN           BoundaryApproxEquals BoundaryNear
+//   cub cap X DEG | rect RECT | cell ID | loop CHAIN | line CHAIN |
+//       point X | poly POLY | union N ID_1 ... ID_N
+//                                     GetCellUnionBound of the region
+//   pl_valid CHAIN                    error
+//   pl_snap CHAIN                     GetSnapLevel
+//   pl_suffix F CHAIN                 GetSuffix point, then next_vertex
+//   pl_unint X NEXT CHAIN             UnInterpolate
+//   pl_project X CHAIN                Project point, then next_vertex
+//   pl_right X CHAIN                  IsOnRight
+//   pl_subsample R CHAIN              SubsampleVertices indices
+//   pl_covers R CHAIN CHAIN           a.NearlyCovers(b) b.NearlyCovers(a)
+//   pg_dist X POLY                    as loop_dist
+//   pg_info POLY                      num_vertices GetSnapLevel IsNormalized,
+//                                     then per loop: depth GetParent
+//                                     GetLastDescendant
+//   pg_invert POLY                    the inverted polygon: per loop its
+//                                     depth and vertex count, then all
+//                                     vertices in order
+//   pg_near R POLY POLY               BoundaryEquals BoundaryApproxEquals
+//                                     BoundaryNear
+//   hull ITEM ...                     vertices of GetConvexHull, or "empty"
+//                                     or "full". An ITEM is "p X",
+//                                     "line CHAIN", "loop CHAIN" or
+//                                     "poly POLY".
 
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -157,6 +199,7 @@
 #include "s2/s2cell_id.h"
 #include "s2/s2cell_union.h"
 #include "s2/s2centroids.h"
+#include "s2/s2convex_hull_query.h"
 #include "s2/s2coords.h"
 #include "s2/s2earth.h"
 #include "s2/s2edge_crosser.h"
@@ -164,14 +207,20 @@
 #include "s2/s2edge_crossings_internal.h"
 #include "s2/s2edge_distances.h"
 #include "s2/s2cell.h"
+#include "s2/s2error.h"
 #include "s2/s2latlng.h"
 #include "s2/s2latlng_rect.h"
 #include "s2/s2latlng_rect_bounder.h"
+#include "s2/s2loop.h"
+#include "s2/s2loop_measures.h"
 #include "s2/s2padded_cell.h"
 #include "s2/s2predicates.h"
 #include "s2/s2measures.h"
 #include "s2/s2metrics.h"
 #include "s2/s2point.h"
+#include "s2/s2point_region.h"
+#include "s2/s2polygon.h"
+#include "s2/s2polyline.h"
 #include "s2/s2pointutil.h"
 #include "s2/s2region.h"
 #include "s2/s2region_coverer.h"
@@ -278,6 +327,233 @@ void PrintPadded(const S2PaddedCell& p) {
   Print({b[0][0], b[0][1], b[1][0], b[1][1], m[0][0], m[0][1], m[1][0],
          m[1][1], c.x(), c.y(), c.z(), e.x(), e.y(), e.z(), x.x(), x.y(),
          x.z()});
+}
+
+std::vector<S2Point> Chain(std::istringstream& in) {
+  int n;
+  in >> n;
+  std::vector<S2Point> points;
+  for (int i = 0; i < n; ++i) points.push_back(Point(in));
+  return points;
+}
+
+std::unique_ptr<S2Polygon> Polygon(std::istringstream& in) {
+  int n;
+  in >> n;
+  std::vector<std::unique_ptr<S2Loop>> loops;
+  for (int i = 0; i < n; ++i) {
+    loops.push_back(std::make_unique<S2Loop>(Chain(in), S2Debug::DISABLE));
+  }
+  return std::make_unique<S2Polygon>(std::move(loops), S2Debug::DISABLE);
+}
+
+void PrintError(bool failed, const S2Error& error) {
+  if (failed) {
+    std::printf("%d %s\n", static_cast<int>(error.code()),
+                std::string(error.message()).c_str());
+  } else {
+    std::printf("ok\n");
+  }
+}
+
+void PrintPoints(const std::vector<S2Point>& points) {
+  const char* separator = "";
+  for (const S2Point& p : points) {
+    std::printf("%s%.17g %.17g %.17g", separator, p.x(), p.y(), p.z());
+    separator = " ";
+  }
+  std::printf("\n");
+}
+
+void PrintLoopVertices(const S2Loop& loop) {
+  std::vector<S2Point> points;
+  for (int i = 0; i < loop.num_vertices(); ++i) points.push_back(loop.vertex(i));
+  PrintPoints(points);
+}
+
+void PrintCellIds(const std::vector<S2CellId>& ids) {
+  PrintIds(ids);
+  std::printf("\n");
+}
+
+int Shapes(const std::string& kind, std::istringstream& in) {
+  if (kind == "loop_info") {
+    S2Loop loop(Chain(in), S2Debug::DISABLE);
+    S2Error error;
+    bool failed = loop.FindValidationError(&error);
+    if (failed) {
+      std::printf("%d ", static_cast<int>(error.code()));
+    } else {
+      std::printf("ok ");
+    }
+    std::printf("%.17g %.17g %.17g %.17g %.17g %d | %s\n", loop.GetArea(),
+                S2::GetApproxArea(loop.vertices_span()),
+                S2::GetPerimeter(loop.vertices_span()).radians(),
+                loop.GetCurvature(), loop.GetCurvatureMaxError(),
+                loop.IsNormalized() ? 1 : 0,
+                failed ? std::string(error.message()).c_str() : "");
+  } else if (kind == "loop_dist" || kind == "pg_dist") {
+    S2Point x = Point(in);
+    S1Angle d, b;
+    S2Point p, q;
+    if (kind == "loop_dist") {
+      S2Loop loop(Chain(in), S2Debug::DISABLE);
+      d = loop.GetDistance(x);
+      b = loop.GetDistanceToBoundary(x);
+      p = loop.Project(x);
+      q = loop.ProjectToBoundary(x);
+    } else {
+      auto polygon = Polygon(in);
+      d = polygon->GetDistance(x);
+      b = polygon->GetDistanceToBoundary(x);
+      p = polygon->Project(x);
+      q = polygon->ProjectToBoundary(x);
+    }
+    Print({d.radians(), b.radians(), p.x(), p.y(), p.z(), q.x(), q.y(), q.z()});
+  } else if (kind == "loop_regular") {
+    S2Point c = Point(in);
+    double degrees = Number(in);
+    int n;
+    in >> n;
+    PrintLoopVertices(*S2Loop::MakeRegularLoop(c, S1Angle::Degrees(degrees), n));
+  } else if (kind == "loop_cell") {
+    S2Loop loop{S2Cell(Id(in))};
+    PrintLoopVertices(loop);
+    PrintLatLngRect(loop.GetRectBound());
+  } else if (kind == "loop_near") {
+    S1Angle r = S1Angle::Radians(Number(in));
+    S2Loop a(Chain(in), S2Debug::DISABLE);
+    S2Loop b(Chain(in), S2Debug::DISABLE);
+    std::printf("%d %d\n", a.BoundaryApproxEquals(b, r) ? 1 : 0,
+                a.BoundaryNear(b, r) ? 1 : 0);
+  } else if (kind == "cub") {
+    std::string type;
+    in >> type;
+    std::vector<S2CellId> ids;
+    if (type == "cap") {
+      S2Point x = Point(in);
+      S2Cap(x, S1Angle::Degrees(Number(in))).GetCellUnionBound(&ids);
+    } else if (type == "rect") {
+      Rect(in).GetCellUnionBound(&ids);
+    } else if (type == "cell") {
+      S2Cell(Id(in)).GetCellUnionBound(&ids);
+    } else if (type == "loop") {
+      S2Loop(Chain(in), S2Debug::DISABLE).GetCellUnionBound(&ids);
+    } else if (type == "line") {
+      S2Polyline(Chain(in), S2Debug::DISABLE).GetCellUnionBound(&ids);
+    } else if (type == "point") {
+      S2PointRegion(Point(in)).GetCellUnionBound(&ids);
+    } else if (type == "poly") {
+      Polygon(in)->GetCellUnionBound(&ids);
+    } else if (type == "union") {
+      int count;
+      in >> count;
+      std::vector<S2CellId> cells;
+      for (int i = 0; i < count; ++i) cells.push_back(Id(in));
+      S2CellUnion(std::move(cells)).GetCellUnionBound(&ids);
+    } else {
+      return Fail(kind + " " + type);
+    }
+    PrintCellIds(ids);
+  } else if (kind == "pl_valid") {
+    S2Polyline line(Chain(in), S2Debug::DISABLE);
+    S2Error error;
+    PrintError(line.FindValidationError(&error), error);
+  } else if (kind == "pl_snap") {
+    std::printf("%d\n", S2Polyline(Chain(in), S2Debug::DISABLE).GetSnapLevel());
+  } else if (kind == "pl_suffix") {
+    double f = Number(in);
+    S2Polyline line(Chain(in), S2Debug::DISABLE);
+    int next;
+    S2Point p = line.GetSuffix(f, &next);
+    std::printf("%.17g %.17g %.17g %d\n", p.x(), p.y(), p.z(), next);
+  } else if (kind == "pl_unint") {
+    S2Point x = Point(in);
+    int next;
+    in >> next;
+    S2Polyline line(Chain(in), S2Debug::DISABLE);
+    Print({line.UnInterpolate(x, next)});
+  } else if (kind == "pl_project") {
+    S2Point x = Point(in);
+    S2Polyline line(Chain(in), S2Debug::DISABLE);
+    int next;
+    S2Point p = line.Project(x, &next);
+    std::printf("%.17g %.17g %.17g %d\n", p.x(), p.y(), p.z(), next);
+  } else if (kind == "pl_right") {
+    S2Point x = Point(in);
+    S2Polyline line(Chain(in), S2Debug::DISABLE);
+    std::printf("%d\n", line.IsOnRight(x) ? 1 : 0);
+  } else if (kind == "pl_subsample") {
+    S1Angle r = S1Angle::Radians(Number(in));
+    S2Polyline line(Chain(in), S2Debug::DISABLE);
+    std::vector<int> indices;
+    line.SubsampleVertices(r, &indices);
+    for (size_t i = 0; i < indices.size(); ++i) {
+      std::printf("%s%d", i == 0 ? "" : " ", indices[i]);
+    }
+    std::printf("\n");
+  } else if (kind == "pl_covers") {
+    S1Angle r = S1Angle::Radians(Number(in));
+    S2Polyline a(Chain(in), S2Debug::DISABLE);
+    S2Polyline b(Chain(in), S2Debug::DISABLE);
+    std::printf("%d %d\n", a.NearlyCovers(b, r) ? 1 : 0,
+                b.NearlyCovers(a, r) ? 1 : 0);
+  } else if (kind == "pg_info") {
+    auto polygon = Polygon(in);
+    std::printf("%d %d %d", polygon->num_vertices(), polygon->GetSnapLevel(),
+                polygon->IsNormalized() ? 1 : 0);
+    for (int k = 0; k < polygon->num_loops(); ++k) {
+      std::printf(" %d %d %d", polygon->loop(k)->depth(), polygon->GetParent(k),
+                  polygon->GetLastDescendant(k));
+    }
+    std::printf("\n");
+  } else if (kind == "pg_invert") {
+    auto polygon = Polygon(in);
+    polygon->Invert();
+    std::vector<S2Point> points;
+    for (int k = 0; k < polygon->num_loops(); ++k) {
+      const S2Loop& loop = *polygon->loop(k);
+      std::printf("%d %d ", loop.depth(), loop.num_vertices());
+      for (int i = 0; i < loop.num_vertices(); ++i) {
+        points.push_back(loop.vertex(i));
+      }
+    }
+    PrintPoints(points);
+  } else if (kind == "pg_near") {
+    S1Angle r = S1Angle::Radians(Number(in));
+    auto a = Polygon(in);
+    auto b = Polygon(in);
+    std::printf("%d %d %d\n", a->BoundaryEquals(*b) ? 1 : 0,
+                a->BoundaryApproxEquals(*b, r) ? 1 : 0,
+                a->BoundaryNear(*b, r) ? 1 : 0);
+  } else if (kind == "hull") {
+    S2ConvexHullQuery query;
+    std::string item;
+    while (in >> item) {
+      if (item == "p") {
+        query.AddPoint(Point(in));
+      } else if (item == "line") {
+        query.AddPolyline(S2Polyline(Chain(in), S2Debug::DISABLE));
+      } else if (item == "loop") {
+        query.AddLoop(S2Loop(Chain(in), S2Debug::DISABLE));
+      } else if (item == "poly") {
+        query.AddPolygon(*Polygon(in));
+      } else {
+        return Fail(kind + " " + item);
+      }
+    }
+    std::unique_ptr<S2Loop> hull = query.GetConvexHull();
+    if (hull->is_empty()) {
+      std::printf("empty\n");
+    } else if (hull->is_full()) {
+      std::printf("full\n");
+    } else {
+      PrintLoopVertices(*hull);
+    }
+  } else {
+    return Fail(kind);
+  }
+  return 0;
 }
 
 int Answer(const std::string& kind, std::istringstream& in) {
@@ -505,7 +781,7 @@ int Answer(const std::string& kind, std::istringstream& in) {
     S2LatLng e = S2LatLngRectBounder::MaxErrorForTests();
     Print({e.lat().radians(), e.lng().radians()});
   } else {
-    return Fail(kind);
+    return Shapes(kind, in);
   }
   return 0;
 }

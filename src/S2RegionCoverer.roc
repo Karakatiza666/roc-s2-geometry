@@ -21,8 +21,12 @@ import S2Point
 ##         .with_max_level(16)
 ##         .covering(cap)
 ##
-## Any type works as a region if it provides `cap_bound`, `contains_cell`, and
-## `may_intersect_cell`; `S2Cap`, `S2LatLngRect`, and `S2CellUnion` all do.
+## Any type works as a region if it provides `cell_union_bound`,
+## `contains_cell`, and `may_intersect_cell`; `S2Cap`, `S2Cell`,
+## `S2LatLngRect`, `S2CellUnion`, `S2Loop`, `S2Polyline`, `S2Polygon` and
+## `S2PointRegion` all do. `cell_union_bound` is upstream's
+## `GetCellUnionBound`: a few cells that cover the region, from which the
+## search starts.
 ##
 ## `max_cells` is a budget, not a guarantee: the result may exceed it slightly
 ## when `min_level` or `level_mod` forces a finer subdivision than the budget
@@ -83,7 +87,7 @@ S2RegionCoverer := { min_level : U64, max_level : U64, level_mod : U64, max_cell
 	## Cells that together cover the whole region.
 	covering : S2RegionCoverer, r -> List(S2CellId)
 		where [
-			r.cap_bound : r -> S2Cap,
+			r.cell_union_bound : r -> List(S2CellId),
 			r.contains_cell : r, S2Cell -> Bool,
 			r.may_intersect_cell : r, S2Cell -> Bool,
 		]
@@ -93,7 +97,7 @@ S2RegionCoverer := { min_level : U64, max_level : U64, level_mod : U64, max_cell
 	## the budget allows.
 	interior_covering : S2RegionCoverer, r -> List(S2CellId)
 		where [
-			r.cap_bound : r -> S2Cap,
+			r.cell_union_bound : r -> List(S2CellId),
 			r.contains_cell : r, S2Cell -> Bool,
 			r.may_intersect_cell : r, S2Cell -> Bool,
 		]
@@ -106,7 +110,7 @@ S2RegionCoverer := { min_level : U64, max_level : U64, level_mod : U64, max_cell
 	## `min_level` and `level_mod` constraints.
 	cell_union_covering : S2RegionCoverer, r -> S2CellUnion
 		where [
-			r.cap_bound : r -> S2Cap,
+			r.cell_union_bound : r -> List(S2CellId),
 			r.contains_cell : r, S2Cell -> Bool,
 			r.may_intersect_cell : r, S2Cell -> Bool,
 		]
@@ -115,7 +119,7 @@ S2RegionCoverer := { min_level : U64, max_level : U64, level_mod : U64, max_cell
 	## `interior_covering` as a cell union, with the cells unchanged.
 	cell_union_interior_covering : S2RegionCoverer, r -> S2CellUnion
 		where [
-			r.cap_bound : r -> S2Cap,
+			r.cell_union_bound : r -> List(S2CellId),
 			r.contains_cell : r, S2Cell -> Bool,
 			r.may_intersect_cell : r, S2Cell -> Bool,
 		]
@@ -135,7 +139,7 @@ Entry : (U64, Candidate)
 ## Collecting them here keeps the generic constraint on the two public
 ## entry points instead of on every internal step.
 Probe : {
-	cap : S2Cap,
+	cell_union_bound : List(S2CellId),
 	contains_cell : S2Cell -> Bool,
 	may_intersect_cell : S2Cell -> Bool,
 }
@@ -146,12 +150,12 @@ Search : { result : List(S2CellId), queue : List(Entry) }
 ## Binds a region's three region operations into a `Probe`.
 probe_of : r -> Probe
 	where [
-		r.cap_bound : r -> S2Cap,
+		r.cell_union_bound : r -> List(S2CellId),
 		r.contains_cell : r, S2Cell -> Bool,
 		r.may_intersect_cell : r, S2Cell -> Bool,
 	]
 probe_of = |region| {
-	cap: region.cap_bound(),
+	cell_union_bound: region.cell_union_bound(),
 	contains_cell: |cell| region.contains_cell(cell),
 	may_intersect_cell: |cell| region.may_intersect_cell(cell),
 }
@@ -214,7 +218,8 @@ refine = |coverer, rest, probe, interior, candidate| {
 ## The cells the search starts from, upstream's `GetInitialCandidates`.
 ##
 ## A small covering of the region's bound, of at most four cells, is a much
-## better start than the six faces.
+## better start than the six faces. The bound is the region's
+## `cell_union_bound`, which upstream's `GetFastCovering` also starts from.
 initial_candidates : S2RegionCoverer, Probe, Bool -> Search
 initial_candidates = |coverer, probe, interior| {
 	fast : S2RegionCoverer
@@ -226,7 +231,7 @@ initial_candidates = |coverer, probe, interior| {
 	}
 	cells = adjust_cell_levels(
 		coverer,
-		canonicalize_covering(fast, cell_union_bound(probe.cap)),
+		canonicalize_covering(fast, probe.cell_union_bound),
 	)
 	var $search = { result: [], queue: [] }
 	for cell_id in cells {
@@ -239,27 +244,6 @@ initial_candidates = |coverer, probe, interior| {
 		)
 	}
 	$search
-}
-
-## A few cells that together cover a cap, upstream's `S2Cap::GetCellUnionBound`.
-##
-## Upstream bounds every region except `S2Cap`, `S2Cell` and `S2Polygon` by
-## the cells that cover its cap bound, so this is the bound of all of them but
-## `S2Polygon`. Upstream bounds a polygon by the cells of its spatial index,
-## which this port does not have, and a cell by the cell itself. A cell is not
-## a region in this port.
-##
-## The cells are the four at the finest level at which the cap contains at
-## most one cell vertex, around the vertex nearest the centre. A cap too large
-## for that gets the six faces.
-cell_union_bound : S2Cap -> List(S2CellId)
-cell_union_bound = |cap| {
-	level = S2Metric.min_width.max_level_for(cap.radius_angle().radians())
-	if level == 0 {
-		[0, 1, 2, 3, 4, 5].map(S2CellId.from_face)
-	} else {
-		S2CellId.from_point(cap.center()).vertex_neighbors(level - 1)
-	}
 }
 
 ## Upstream's `CanonicalizeCovering`: makes a covering satisfy the coverer's
@@ -975,4 +959,11 @@ expect {
 	region = S2CellUnion.from_cell_ids([S2CellId.from_face(0).child_begin_at_level(4)])
 	S2RegionCoverer.default().with_max_cells(8).covering(region).map(S2CellId.id)
 		== [4503599627370496]
+}
+
+# A cell is a region: it is its own cell union bound, so a coverer allowed
+# its level returns it.
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_face(2).child_begin_at_level(9))
+	S2RegionCoverer.default().covering(cell) == [cell.id()]
 }

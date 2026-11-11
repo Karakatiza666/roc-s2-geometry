@@ -130,7 +130,10 @@ expect S2ShapeTest.failures(
 		line = S2Polyline.from_points([cell.vertex(0), cell.vertex(1), cell.vertex(2)])
 		# Interpolating and inverting the interpolation is the identity.
 		[0.0, 0.25, 0.5, 0.75, 1.0].all(
-			|t| (line.un_interpolate(line.interpolate(t)) - t).abs() < 1e-9,
+			|t| {
+				(point, next_vertex) = line.suffix(t)
+				(line.un_interpolate(point, next_vertex) - t).abs() < 1e-9
+			},
 		)
 	},
 )
@@ -142,7 +145,7 @@ expect S2ShapeTest.failures(
 		# Every vertex lies on the polyline, and the projection finds it.
 		[0, 1, 2].all(
 			|k| {
-				(closest, _edge) = line.project(cell.vertex(k))
+				(closest, _next_vertex) = line.project(cell.vertex(k))
 				closest.approx_eq(cell.vertex(k), 1e-14)
 			},
 		)

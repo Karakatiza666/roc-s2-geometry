@@ -566,6 +566,11 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 		}
 	}
 
+	## A few cells that cover the rectangle: those of its bounding cap, as
+	## upstream's `S2LatLngRect::GetCellUnionBound` gives them.
+	cell_union_bound : S2LatLngRect -> List(S2CellId)
+	cell_union_bound = |r| r.cap_bound().cell_union_bound()
+
 	## True when the rectangle contains the whole cell.
 	contains_cell : S2LatLngRect, S2Cell -> Bool
 	contains_cell = |r, cell| r.contains_rect(S2LatLngRect.from_cell(cell))
@@ -1366,3 +1371,8 @@ expect {
 		and a.directed_hausdorff_distance(b).radians() == 2.963160949125901
 		and a.hausdorff_distance(b).radians() == 2.963160949125901
 }
+
+# Upstream's GetCellUnionBound, through tools/s2_oracle.cc. Near a cube
+# corner the vertex has three neighbours, not four.
+expect S2LatLngRect.new(R1Interval.new(0.1, 0.3), S1Interval.new(-0.5, 0.2)).cell_union_bound() == [1152921504606846976, 10376293541461622784, 5764607523034234880].map(S2CellId.from_id)
+expect S2LatLngRect.new(R1Interval.new(0.1, 0.3), S1Interval.new(3.0, -3.0)).cell_union_bound() == [7205759403792793600, 7782220156096217088, 8935141660703064064, 8358680908399640576].map(S2CellId.from_id)

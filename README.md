@@ -88,6 +88,8 @@ With no arguments it covers the same 2 km around San Francisco.
 | `S2RegionCoverer` | Approximates any region by a set of cells |
 | `S2Loop` `S2Polyline` | A simple closed polygon and an open chain of edges |
 | `S2Polygon` | Loops nested into a region with holes, and the predicates between two of them |
+| `S2PointRegion` | A single point as a region, so that a coverer can cover it |
+| `S2ConvexHullQuery` | The smallest convex loop around a set of points, polylines, loops and polygons |
 | `S2Edge` | Edge crossings, intersections, interpolation, and distances between points and edges and between two edges |
 | `S2EdgeCrosser` | Tests one edge against a chain of others, reusing work between the tests |
 | `S2Predicates` | Orientation and distance comparisons that are exact rather than merely careful |
@@ -134,25 +136,28 @@ write `S2LatLngRect.from_cell(cell)` and `S2Cap.from_cell(cell)`. Every other
 bound is a method where you would expect it.
 
 **A region is any type with three methods.** Upstream has an `S2Region` base
-class; here `S2RegionCoverer` is generic over any type providing `cap_bound`,
-`contains_cell` and `may_intersect_cell`:
+class; here `S2RegionCoverer` is generic over any type providing
+`cell_union_bound`, `contains_cell` and `may_intersect_cell`:
 
 ```roc
 covering : S2RegionCoverer, r -> List(S2CellId)
     where [
-        r.cap_bound : r -> S2Cap,
+        r.cell_union_bound : r -> List(S2CellId),
         r.contains_cell : r, S2Cell -> Bool,
         r.may_intersect_cell : r, S2Cell -> Bool,
     ]
 ```
 
-`S2Cap`, `S2LatLngRect`, `S2CellUnion`, `S2Loop`, `S2Polyline` and `S2Polygon`
-all satisfy it, and so can a type of your own.
+`S2Cap`, `S2Cell`, `S2LatLngRect`, `S2CellUnion`, `S2Loop`, `S2Polyline`,
+`S2Polygon` and `S2PointRegion` all satisfy it, and so can a type of your own.
+For a type with a cap bound, `|r| r.cap_bound().cell_union_bound()` is the
+usual `cell_union_bound`.
 
-The coverer starts from a few cells that cover the region's cap bound.
-Upstream does the same for every region except `S2Polygon`, which it bounds
-by the cells of its spatial index. This port has no such index, so a covering
-of a polygon can differ from upstream's.
+The coverer starts from the region's `cell_union_bound`, as upstream does.
+Every region here bounds itself by the cells that cover its cap bound, except
+`S2Cell`, which is its own bound. Upstream does the same, except for
+`S2Polygon`, which it bounds by the cells of its spatial index. This port has
+no such index, so a covering of a polygon can differ from upstream's.
 
 ## Exactness
 
@@ -185,9 +190,9 @@ is arbitrary rather than canonical. That reaches the functions built on it,
 such as `S2Edge.point_on_line` for antipodal endpoints. The port's own
 `atan2` and the builtin trigonometry can differ from the C library by one unit
 in the last place, so a latitude or a distance occasionally does too. `S2Loop`
-and `S2Polygon` have no spatial index, so their cell tests are linear in the
-vertex count, and `is_valid` and the predicates between two shapes are
-quadratic.
+and `S2Polygon` have no spatial index, so their cell tests and distances are
+linear in the vertex count, and `is_valid` and the predicates between two
+shapes are quadratic.
 
 ## Tests
 

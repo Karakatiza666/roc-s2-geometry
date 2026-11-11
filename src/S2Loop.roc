@@ -1,6 +1,8 @@
 import S1Angle
+import S1ChordAngle
 import S2Cap
 import S2Cell
+import S2CellId
 import S2Edge
 import S2LatLng
 import S2LatLngRect
@@ -40,6 +42,46 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 	## The loop through the given positions, in order.
 	from_lat_lngs : List(S2LatLng) -> S2Loop
 	from_lat_lngs = |points| S2Loop.from_points(points.map(S2LatLng.to_point))
+
+	## The loop through the four vertices of the cell, in the cell's
+	## counterclockwise order, as upstream's `S2Loop(const S2Cell&)` builds
+	## it.
+	##
+	## The loop and the cell do not contain exactly the same points. A cell
+	## contains its whole boundary, so a vertex shared by four cells is in all
+	## four, but it is in only one of the four loops made from them. The
+	## loop's bound comes from its edges, as for any loop, and so can be
+	## tighter than `S2LatLngRect.from_cell`.
+	from_cell : S2Cell -> S2Loop
+	from_cell = |cell| S2Loop.from_points([cell.vertex(0), cell.vertex(1), cell.vertex(2), cell.vertex(3)])
+
+	## A regular polygon of `num_vertices` vertices, each at the distance
+	## `radius` from `center`. Upstream's `S2Loop::MakeRegularLoop`.
+	##
+	## The vertices run counterclockwise around `center`. The first one is in
+	## the direction of the first axis of `S2Point.frame(center)`.
+	make_regular_loop : S2Point, S1Angle, U64 -> S2Loop
+	make_regular_loop = |center, radius, num_vertices|
+		S2Loop.make_regular_loop_in_frame(center.frame(), radius, num_vertices)
+
+	## Like `make_regular_loop`, but centred on the third axis of the frame,
+	## with the first vertex in the direction of its first axis. The frame is
+	## the triple of column vectors that `S2Point.frame` returns. This lets a
+	## caller rotate the loop.
+	make_regular_loop_in_frame : (S2Point, S2Point, S2Point), S1Angle, U64 -> S2Loop
+	make_regular_loop_in_frame = |frame, radius, num_vertices| {
+		r_and_z = radius.sin_cos()
+		step = 2.0 * F64.pi / num_vertices.to_f64()
+		var $vertices = []
+		var $i = 0
+		while $i < num_vertices {
+			a = S1Angle.from_radians($i.to_f64() * step).sin_cos()
+			p = S2Point.new(r_and_z.sin * a.cos, r_and_z.sin * a.sin, r_and_z.cos)
+			$vertices = $vertices.append(S2Point.from_frame(frame, p).normalize())
+			$i = $i + 1
+		}
+		S2Loop.from_points($vertices)
+	}
 
 	## The loop containing nothing.
 	empty : () -> S2Loop
@@ -88,60 +130,72 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 	is_empty_or_full : S2Loop -> Bool
 	is_empty_or_full = |loop| loop.vertices.len() == 1
 
-	## True when the loop is a well-formed simple polygon.
-	##
-	## Checks vertex count, unit length, adjacent duplicates and antipodes,
-	## and that no two edges cross. The crossing check compares every pair of
-	## edges, so it costs O(n^2).
+	## True when the loop is a well-formed simple polygon: when
+	## `find_validation_error` finds nothing.
 	is_valid : S2Loop -> Bool
-	is_valid = |loop| {
-		if loop.is_empty_or_full() {
-			return Bool.True
-		}
+	is_valid = |loop| loop.find_validation_error().is_ok()
+
+	## The first reason the loop is not well formed, if there is one.
+	##
+	## These are the checks of upstream's `S2Loop::FindValidationError`, in
+	## its order:
+	##
+	## - `NotUnitLength(i)`: vertex `i` is not unit length.
+	## - `NotEnoughVertices`: the loop has fewer than three vertices and is
+	##   not the empty or the full loop.
+	## - `DegenerateEdge(i)`: edge `i` joins a vertex to itself.
+	## - `AntipodalVertices(i, j)`: adjacent vertices `i` and `j` are
+	##   antipodal.
+	## - `DuplicateVertex(i, j)`: edges `i` and `j` end at the same vertex.
+	## - `SelfIntersection(i, j)`: edges `i` and `j` cross.
+	##
+	## Edge `i` runs from vertex `i` to vertex `i + 1`. Upstream finds the
+	## last two kinds through its spatial index. This port compares every
+	## pair of edges in order, which costs O(n^2), so for a loop with several
+	## such faults it can name a different pair than upstream does.
+	find_validation_error : S2Loop -> Try({}, [NotUnitLength(U64), NotEnoughVertices, DegenerateEdge(U64), AntipodalVertices(U64, U64), DuplicateVertex(U64, U64), SelfIntersection(U64, U64)])
+	find_validation_error = |loop| {
 		n = loop.vertices.len()
-		if n < 3 {
-			return Bool.False
-		}
-		var $ok = Bool.True
-		for v in loop.vertices {
-			if !v.is_unit_length() {
-				$ok = Bool.False
+		var $k = 0
+		while $k < n {
+			if !loop.vertex($k).is_unit_length() {
+				return Err(NotUnitLength($k))
 			}
+			$k = $k + 1
+		}
+		if n < 3 {
+			return if (loop.is_empty_or_full()) Ok({}) else Err(NotEnoughVertices)
 		}
 		var $i = 0
 		while $i < n {
 			a = loop.vertex($i)
 			b = loop.vertex($i + 1)
-			if a == b or a == -b {
-				$ok = Bool.False
+			if a == b {
+				return Err(DegenerateEdge($i))
+			}
+			if a == -b {
+				return Err(AntipodalVertices($i, ($i + 1) % n))
 			}
 			$i = $i + 1
 		}
-		if !$ok {
-			return Bool.False
-		}
-
-		# No two edges may cross, and only adjacent edges may share a vertex.
-		var $j = 0
-		while $j < n {
-			var $k = $j + 2
-			while $k < n {
-				if !($j == 0 and $k == n - 1) {
-					crossing = S2Edge.crossing_sign(
-						loop.vertex($j),
-						loop.vertex($j + 1),
-						loop.vertex($k),
-						loop.vertex($k + 1),
-					)
-					if crossing >= 0 {
-						$ok = Bool.False
-					}
+		# Two edges that share a vertex have a crossing sign of 0. Only the
+		# pair that ends at the shared vertex reports it, as upstream does.
+		var $a = 0
+		while $a < n {
+			var $b = $a + 1
+			while $b < n {
+				sign = S2Edge.crossing_sign(loop.vertex($a), loop.vertex($a + 1), loop.vertex($b), loop.vertex($b + 1))
+				if sign > 0 {
+					return Err(SelfIntersection($a, $b))
 				}
-				$k = $k + 1
+				if sign == 0 and loop.vertex($a + 1) == loop.vertex($b + 1) {
+					return Err(DuplicateVertex($a, $b))
+				}
+				$b = $b + 1
 			}
-			$j = $j + 1
+			$a = $a + 1
 		}
-		$ok
+		Ok({})
 	}
 
 	## True when the point is inside the loop.
@@ -212,6 +266,83 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 		S2Boundary.curvature(loop.vertices)
 	}
 
+	## The largest error `turning_angle` can make for this loop, upstream's
+	## `GetCurvatureMaxError`: 11.25 machine epsilons per vertex.
+	curvature_max_error : S2Loop -> F64
+	curvature_max_error = |loop| S2Boundary.curvature_max_error(loop.vertices)
+
+	## The area of the loop's interior from its turning angle: `2pi` less
+	## `turning_angle`. Upstream's `S2::GetApproxArea`.
+	##
+	## Cheaper than `area`, and less accurate for small loops: its absolute
+	## error is about `curvature_max_error`. The empty loop gives 0 and the
+	## full loop `4pi`.
+	approx_area : S2Loop -> F64
+	approx_area = |loop| 2.0 * F64.pi - loop.turning_angle()
+
+	## The total length of the loop's edges, the closing edge included.
+	## Upstream's `S2::GetPerimeter`. The empty and full loops give zero.
+	perimeter : S2Loop -> S1Angle
+	perimeter = |loop| {
+		n = loop.vertices.len()
+		if n <= 1 {
+			return S1Angle.zero()
+		}
+		var $total = S1Angle.zero()
+		var $i = 0
+		while $i < n {
+			$total = $total + loop.vertex($i).angle_to(loop.vertex($i + 1))
+			$i = $i + 1
+		}
+		$total
+	}
+
+	## The distance from `x` to the loop's interior: zero when the loop
+	## contains `x`, otherwise the distance to the boundary. The empty loop
+	## gives `S1Angle.infinity()`. Upstream's `S2Loop::GetDistance`.
+	##
+	## Upstream finds the nearest edge with its closest-edge query. This port
+	## scans every edge, so the cost is linear in the vertex count.
+	distance_to_point : S2Loop, S2Point -> S1Angle
+	distance_to_point = |loop, x|
+		if loop.contains_point(x) {
+			S1Angle.zero()
+		} else {
+			loop.distance_to_boundary(x)
+		}
+
+	## The distance from `x` to the nearest point of the loop's edges.
+	## Upstream's `GetDistanceToBoundary`. The empty and full loops have no
+	## boundary, so they give `S1Angle.infinity()`. The cost is linear in the
+	## vertex count.
+	distance_to_boundary : S2Loop, S2Point -> S1Angle
+	distance_to_boundary = |loop, x|
+		match closest_edge(loop, x) {
+			Ok(edge) => edge.distance.to_angle()
+			Err(NoEdges) => S1Angle.infinity()
+		}
+
+	## `x` itself when the loop contains it, otherwise the nearest point of
+	## the loop's boundary. The empty loop gives `x`. Upstream's
+	## `S2Loop::Project`. The result may or may not be inside the loop.
+	project : S2Loop, S2Point -> S2Point
+	project = |loop, x|
+		if loop.contains_point(x) {
+			x
+		} else {
+			loop.project_to_boundary(x)
+		}
+
+	## The nearest point of the loop's boundary to `x`. The empty and full
+	## loops have no boundary, so they give `x`. Upstream's
+	## `ProjectToBoundary`. The cost is linear in the vertex count.
+	project_to_boundary : S2Loop, S2Point -> S2Point
+	project_to_boundary = |loop, x|
+		match closest_edge(loop, x) {
+			Ok(edge) => S2Edge.project(x, edge.v0, edge.v1)
+			Err(NoEdges) => x
+		}
+
 	## True when the loop encloses at most half the sphere, which is the
 	## orientation S2 treats as canonical.
 	##
@@ -280,6 +411,69 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 			$offset = $offset + 1
 		}
 		$found
+	}
+
+	## True when the two loops have the same boundary to within `max_error`:
+	## the same number of vertices, in the same cyclic order, each within
+	## `max_error` of its partner. Upstream's `BoundaryApproxEquals`.
+	##
+	## The empty and full loops are not near each other. Since vertices match
+	## only approximately, every starting offset is tried, so the cost is
+	## O(n^2) at worst.
+	boundary_approx_equals : S2Loop, S2Loop, S1Angle -> Bool
+	boundary_approx_equals = |loop, other, max_error| {
+		n = loop.num_vertices()
+		if n != other.num_vertices() {
+			return Bool.False
+		}
+		if loop.is_empty_or_full() {
+			return loop.is_empty() == other.is_empty()
+		}
+		near = |a, b| a.angle_to(b) <= max_error
+		var $offset = 0
+		while $offset < n {
+			if near(loop.vertex($offset), other.vertex(0)) {
+				var $same = Bool.True
+				var $i = 0
+				while $same and $i < n {
+					if !near(loop.vertex($i + $offset), other.vertex($i)) {
+						$same = Bool.False
+					}
+					$i = $i + 1
+				}
+				if $same {
+					return Bool.True
+				}
+			}
+			$offset = $offset + 1
+		}
+		Bool.False
+	}
+
+	## True when the two boundaries stay within `max_error` of each other
+	## along their whole length. Upstream's `BoundaryNear`.
+	##
+	## The loops may have different vertex counts. Picture two cars driving
+	## once around the two loops, never backwards: the answer is true when
+	## they can always stay within `max_error` of each other. The empty loop
+	## is near only the empty loop, and the full loop only the full loop.
+	##
+	## Each starting vertex of this loop is tried with a search over pairs of
+	## positions, so the cost is O(n^2 m) at worst for loops of `n` and `m`
+	## vertices.
+	boundary_near : S2Loop, S2Loop, S1Angle -> Bool
+	boundary_near = |loop, other, max_error| {
+		if loop.is_empty_or_full() or other.is_empty_or_full() {
+			return (loop.is_empty() and other.is_empty()) or (loop.is_full() and other.is_full())
+		}
+		var $offset = 0
+		while $offset < loop.num_vertices() {
+			if match_boundaries(loop, other, $offset, max_error) {
+				return Bool.True
+			}
+			$offset = $offset + 1
+		}
+		Bool.False
 	}
 
 	## True when this loop contains every point of the other one.
@@ -472,6 +666,11 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 		S2Boundary.crosses_cell_boundary(loop.vertices, cell)
 	}
 
+	## A few cells that cover the loop: those of its bounding cap, as
+	## upstream's `S2Loop::GetCellUnionBound` gives them.
+	cell_union_bound : S2Loop -> List(S2CellId)
+	cell_union_bound = |loop| loop.cap_bound().cell_union_bound()
+
 	## True when the two loops have the same vertices to within `max_error`
 	## radians.
 	approx_eq : S2Loop, S2Loop, F64 -> Bool
@@ -495,6 +694,52 @@ S2Loop := { vertices : List(S2Point), origin_inside : Bool, bound : S2LatLngRect
 
 	to_inspect : S2Loop -> Str
 	to_inspect = |loop| "S2Loop(${loop.vertices.len().to_str()} vertices)"
+}
+
+## The edge of the loop nearest to `x`, by a scan of every edge.
+closest_edge : S2Loop, S2Point -> Try({ distance : S1ChordAngle, v0 : S2Point, v1 : S2Point }, [NoEdges])
+closest_edge = |loop, x|
+	if loop.is_empty_or_full() {
+		Err(NoEdges)
+	} else {
+		S2Boundary.closest_edge([loop.vertices], x)
+	}
+
+## Upstream's `MatchBoundaries`: true when the two boundaries can be walked
+## together, starting at vertex `a_offset` of `a` and vertex 0 of `b`, with
+## each step keeping the next vertex of one loop within `max_error` of the
+## current edge of the other.
+##
+## A state `(i, j)` counts the vertices passed on each loop. Where both loops
+## can advance, only one choice may succeed, so the states wait on a stack,
+## and a set keeps any state from being explored twice.
+match_boundaries : S2Loop, S2Loop, U64, S1Angle -> Bool
+match_boundaries = |a, b, a_offset, max_error| {
+	na = a.num_vertices()
+	nb = b.num_vertices()
+	key = |i, j| i * (nb + 1) + j
+	var $pending = [(0, 0)]
+	var $done = Set.empty()
+	while !$pending.is_empty() {
+		(i, j) = $pending.last() ?? (0, 0)
+		$pending = $pending.drop_last(1)
+		if i == na and j == nb {
+			return Bool.True
+		}
+		$done = $done.insert(key(i, j))
+		io = if (i + a_offset >= na) i + a_offset - na else i + a_offset
+		if i < na
+			and !$done.contains(key(i + 1, j))
+			and S2Edge.distance_to_edge(a.vertex(io + 1), b.vertex(j), b.vertex(j + 1)).to_angle() <= max_error {
+			$pending = $pending.append((i + 1, j))
+		}
+		if j < nb
+			and !$done.contains(key(i, j + 1))
+			and S2Edge.distance_to_edge(b.vertex(j + 1), a.vertex(io), a.vertex(io + 1)).to_angle() <= max_error {
+			$pending = $pending.append((i, j + 1))
+		}
+	}
+	Bool.False
 }
 
 expect S2Loop.empty().is_empty()
@@ -891,3 +1136,145 @@ expect {
 	k = F64.pi / 4.0 * (1.0 + 2.0 * h)
 	loop.centroid().approx_eq(S2Point.new(F64.pi / 4.0, -k, k), 1e-12)
 }
+
+## True when `a` is within a few units in the last place of `b`.
+close : F64, F64 -> Bool
+close = |a, b| (a - b).abs() <= 1e-15 * b.abs()
+
+# Upstream's S2LoopTestBase.MakeRegularLoop: four vertices 20 degrees from
+# (80, 135). The vertices are from upstream through tools/s2_oracle.cc.
+expect {
+	loop = S2Loop.make_regular_loop(S2LatLng.from_degrees(80.0, 135.0).to_point(), S1Angle.from_degrees(20.0), 4)
+	expected = [
+		S2Point.new(-0.10592043631161428, 0.4547880263631654, 0.88427863948432794),
+		S2Point.new(-0.45468293541276456, 0.11965015866898869, 0.88257989313994556),
+		S2Point.new(-0.12484515031268675, -0.22402243973886438, 0.96655451731231878),
+		S2Point.new(0.22391734878846359, 0.11111542795531232, 0.96825326365670139),
+	]
+	loop.num_vertices() == 4 and List.map2(loop.vertices(), expected, |a, b| a.approx_eq(b, 1e-15)).all(|ok| ok)
+}
+# S2Loop(S2Cell) has the cell's vertices, and its own bound from its edges,
+# upstream's S2Loop.S2CellConstructorAndContains. The values are from upstream.
+# The bound and the areas below go through the trigonometry, which can differ
+# from the C library in the last place, so they are compared to within that.
+expect {
+	cell = S2Cell.from_cell_id(S2CellId.from_id(9926595690882924544))
+	loop = S2Loop.from_cell(cell)
+	copy = S2Loop.from_points(loop.vertices())
+	expected = [
+		S2Point.new(0.20882807852131757, -0.72858243420304736, 0.65234842698657325),
+		S2Point.new(0.20889010772616387, -0.72879884853477228, 0.65208677433953655),
+		S2Point.new(0.20919955365520837, -0.72874955125747487, 0.65204266600621352),
+		S2Point.new(0.20913744096138975, -0.72853318082571805, 0.65230432715419162),
+	]
+	bound = loop.rect_bound()
+	loop.vertices() == expected
+		and close(bound.lat().lo(), 0.71027548816598163) and close(bound.lat().hi(), 0.71067883976107338)
+		and close(bound.lng().lo(), -1.2916572505888528) and close(bound.lng().hi(), -1.2912469917194127)
+		and copy.contains(loop) and loop.contains(copy)
+		and !bound.contains_rect(S2LatLngRect.from_cell(cell))
+}
+# Upstream's S2Loop.IsValidDetectsInvalidLoops. The upstream messages, through
+# tools/s2_oracle.cc, name the same edges:
+# Non-empty, non-full loops must have at least 3 vertices.
+# Non-empty, non-full loops must have at least 3 vertices.
+# Edge 0 is degenerate (duplicate vertex).
+# Edge 2 is degenerate (duplicate vertex).
+# Edge 2 has duplicate vertex with edge 4.
+# Edge 0 crosses edge 3.
+# Vertices 0 and 1 are antipodal. Vertex 0 is not unit length.
+expect S2Loop.from_lat_lngs([]).find_validation_error() == Err(NotEnoughVertices)
+expect S2Loop.from_lat_lngs([S2LatLng.from_degrees(20.0, 20.0), S2LatLng.from_degrees(21.0, 21.0)]).find_validation_error() == Err(NotEnoughVertices)
+expect S2Loop.from_lat_lngs([S2LatLng.from_degrees(20.0, 20.0), S2LatLng.from_degrees(20.0, 20.0), S2LatLng.from_degrees(20.0, 21.0)]).find_validation_error() == Err(DegenerateEdge(0))
+expect S2Loop.from_lat_lngs([S2LatLng.from_degrees(20.0, 20.0), S2LatLng.from_degrees(20.0, 21.0), S2LatLng.from_degrees(20.0, 20.0)]).find_validation_error() == Err(DegenerateEdge(2))
+expect S2Loop.from_lat_lngs([S2LatLng.from_degrees(20.0, 20.0), S2LatLng.from_degrees(21.0, 21.0), S2LatLng.from_degrees(21.0, 20.0), S2LatLng.from_degrees(20.0, 20.0), S2LatLng.from_degrees(20.0, 21.0)]).find_validation_error() == Err(DuplicateVertex(2, 4))
+expect S2Loop.from_lat_lngs([S2LatLng.from_degrees(20.0, 20.0), S2LatLng.from_degrees(21.0, 21.0), S2LatLng.from_degrees(21.0, 20.5), S2LatLng.from_degrees(21.0, 20.0), S2LatLng.from_degrees(20.0, 21.0)]).find_validation_error() == Err(SelfIntersection(0, 3))
+expect S2Loop.from_points([S2Point.new(1.0, 0.0, 0.0), S2Point.new(-1.0, 0.0, 0.0), S2Point.new(0.0, 0.0, 1.0)]).find_validation_error() == Err(AntipodalVertices(0, 1))
+expect S2Loop.from_points([S2Point.new(2.0, 0.0, 0.0), S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 0.0, 1.0)]).find_validation_error() == Err(NotUnitLength(0))
+expect S2Loop.from_points([S2Point.new(2.0, 0.0, 0.0)]).find_validation_error() == Err(NotUnitLength(0))
+# Area, approximate area, perimeter and curvature error from upstream's
+# GetArea, S2::GetApproxArea, S2::GetPerimeter and GetCurvatureMaxError.
+expect {
+	loop = S2Loop.from_lat_lngs([S2LatLng.from_degrees(-1.0, -1.0), S2LatLng.from_degrees(-1.0, 1.0), S2LatLng.from_degrees(1.0, 1.0), S2LatLng.from_degrees(1.0, -1.0)])
+	close(loop.area(), 0.0012185315123719783)
+		and loop.approx_area() == 0.0012185315123716123
+		and loop.perimeter().radians() == 0.13961570619605679
+		and loop.curvature_max_error() == 9.9920072216264089e-15
+}
+expect {
+	loop = S2Loop.from_lat_lngs([S2LatLng.from_degrees(20.0, 20.0), S2LatLng.from_degrees(21.0, 21.0), S2LatLng.from_degrees(21.0, 20.5), S2LatLng.from_degrees(21.0, 20.0), S2LatLng.from_degrees(20.0, 21.0)])
+	close(loop.area(), 12.566369579527354)
+		and loop.approx_area() == 6.2831842723477678
+		and loop.perimeter().radians() == 0.080522129010809462
+		and loop.curvature_max_error() == 1.2490009027033011e-14
+}
+expect {
+	loop = S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(0.0, 20.0), S2LatLng.from_degrees(0.0, 30.0)])
+	close(loop.area(), 2.2250738585072014e-308)
+		and loop.approx_area() == 8.8817841970012523e-16
+		and loop.perimeter().radians() == 0.69813170079773168
+		and loop.curvature_max_error() == 7.4940054162198066e-15
+}
+# The empty and full loops have no perimeter. Upstream's S2::GetApproxArea of
+# the bare one-vertex list gives 0 for both; the loop's own convention gives
+# 0 and 4pi, as `area` does.
+expect S2Loop.empty().perimeter().radians() == 0.0 and S2Loop.full().perimeter().radians() == 0.0
+expect S2Loop.empty().curvature_max_error() == 2.4980018054066022e-15 and S2Loop.full().curvature_max_error() == 2.4980018054066022e-15
+expect S2Loop.empty().approx_area() == 0.0 and S2Loop.full().approx_area() == 4.0 * F64.pi
+# Upstream's S2LoopTestBase.DistanceMethods: the empty and full loops, then a
+# vertex, a point on an edge, a point inside, and points outside that project
+# to an edge and to a vertex of a square. Distances in radians, then Project
+# and ProjectToBoundary, all from upstream.
+expect {
+	square = S2Loop.from_lat_lngs([S2LatLng.from_degrees(-1.0, -1.0), S2LatLng.from_degrees(-1.0, 1.0), S2LatLng.from_degrees(1.0, 1.0), S2LatLng.from_degrees(1.0, -1.0)])
+	check = |loop, x, expected| {
+		(distance, boundary, projected, on_boundary) = expected
+		loop.distance_to_point(x).radians() == distance
+			and loop.distance_to_boundary(x).radians() == boundary
+			and loop.project(x) == projected
+			and loop.project_to_boundary(x) == on_boundary
+	}
+	y = S2Point.new(0.0, 1.0, 0.0)
+	inf = S1Angle.infinity().radians()
+	check(S2Loop.empty(), y, (inf, inf, S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 1.0, 0.0)))
+		and check(S2Loop.full(), y, (0.0, inf, S2Point.new(0.0, 1.0, 0.0), S2Point.new(0.0, 1.0, 0.0)))
+		and check(square, S2LatLng.from_degrees(1.0, -1.0).to_point(), (0.0, 0.0, S2Point.new(0.99969541350954794, -0.017449748351250485, 0.017452406437283512), S2Point.new(0.99969541350954794, -0.017449748351250485, 0.017452406437283512)))
+		and check(square, S2LatLng.from_degrees(0.5, 1.0).to_point(), (1.1102230246251565e-16, 1.1102230246251565e-16, S2Point.new(0.9998096240198644, 0.017451741903123544, 0.0087265354983739364), S2Point.new(0.9998096240198644, 0.017451741903123544, 0.0087265354983739364)))
+		and check(square, S2LatLng.from_degrees(0.0, 0.5).to_point(), (0.0, 0.008726646259971646, S2Point.new(0.99996192306417131, 0.0087265354983739347, 0.0), S2Point.new(0.99984769515639116, 0.017452406437283512, -0.0)))
+		and check(square, S2LatLng.from_degrees(0.0, -2.0).to_point(), (0.017453292519943292, 0.017453292519943292, S2Point.new(0.99984769515639138, -0.017452406437283512, 0.0), S2Point.new(0.99984769515639138, -0.017452406437283512, 0.0)))
+		and check(square, S2LatLng.from_degrees(3.0, 4.0).to_point(), (0.062899979934787242, 0.062899979934787242, S2Point.new(0.99969541350954794, 0.017449748351250485, 0.017452406437283512), S2Point.new(0.99969541350954794, 0.017449748351250485, 0.017452406437283512)))
+}
+# Upstream's S2Loop.BoundaryNear, with BoundaryApproxEquals for the same
+# pairs. Each pair is (approx_equals, near), from upstream.
+expect {
+	a = S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(5.0, 5.0)])
+	b = S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.1), S2LatLng.from_degrees(-0.1, 9.9), S2LatLng.from_degrees(5.0, 5.2)])
+	(a.boundary_approx_equals(b, S1Angle.from_degrees(0.5)), a.boundary_near(b, S1Angle.from_degrees(0.5))) == (Bool.True, Bool.True)
+}
+expect {
+	a = S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 3.0), S2LatLng.from_degrees(0.0, 7.0), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(3.0, 7.0), S2LatLng.from_degrees(5.0, 5.0)])
+	b = S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 10.0), S2LatLng.from_degrees(2.0, 8.0), S2LatLng.from_degrees(5.0, 5.0), S2LatLng.from_degrees(4.0, 4.0), S2LatLng.from_degrees(3.0, 3.0), S2LatLng.from_degrees(1.0, 1.0)])
+	(a.boundary_approx_equals(b, S1Angle.from_radians(1e-3)), a.boundary_near(b, S1Angle.from_radians(1e-3))) == (Bool.False, Bool.True)
+}
+expect {
+	a = S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 2.0), S2LatLng.from_degrees(2.0, 2.0), S2LatLng.from_degrees(2.0, 0.0)])
+	b = S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(1.9999, 1.0), S2LatLng.from_degrees(0.0, 2.0), S2LatLng.from_degrees(2.0, 2.0), S2LatLng.from_degrees(2.0, 0.0)])
+	(a.boundary_approx_equals(b, S1Angle.from_degrees(0.5)), a.boundary_near(b, S1Angle.from_degrees(0.5))) == (Bool.False, Bool.False)
+}
+expect {
+	a = S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.1, 0.0), S2LatLng.from_degrees(0.1, 1.0), S2LatLng.from_degrees(0.1, 2.0), S2LatLng.from_degrees(0.1, 3.0), S2LatLng.from_degrees(0.1, 4.0), S2LatLng.from_degrees(1.0, 4.0), S2LatLng.from_degrees(2.0, 4.0), S2LatLng.from_degrees(3.0, 4.0), S2LatLng.from_degrees(2.0, 4.1), S2LatLng.from_degrees(1.0, 4.1), S2LatLng.from_degrees(2.0, 4.2), S2LatLng.from_degrees(3.0, 4.2), S2LatLng.from_degrees(4.0, 4.2), S2LatLng.from_degrees(5.0, 4.2)])
+	b = S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 1.0), S2LatLng.from_degrees(0.0, 2.0), S2LatLng.from_degrees(0.0, 3.0), S2LatLng.from_degrees(0.1, 2.0), S2LatLng.from_degrees(0.1, 1.0), S2LatLng.from_degrees(0.2, 2.0), S2LatLng.from_degrees(0.2, 3.0), S2LatLng.from_degrees(0.2, 4.0), S2LatLng.from_degrees(1.0, 4.1), S2LatLng.from_degrees(2.0, 4.0), S2LatLng.from_degrees(3.0, 4.0), S2LatLng.from_degrees(4.0, 4.0), S2LatLng.from_degrees(5.0, 4.0)])
+	(a.boundary_approx_equals(b, S1Angle.from_degrees(1.5)), a.boundary_near(b, S1Angle.from_degrees(1.5))) == (Bool.False, Bool.True)
+}
+expect {
+	a = S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.1, 0.0), S2LatLng.from_degrees(0.1, 1.0), S2LatLng.from_degrees(0.1, 2.0), S2LatLng.from_degrees(0.1, 3.0), S2LatLng.from_degrees(0.1, 4.0), S2LatLng.from_degrees(1.0, 4.0), S2LatLng.from_degrees(2.0, 4.0), S2LatLng.from_degrees(3.0, 4.0), S2LatLng.from_degrees(2.0, 4.1), S2LatLng.from_degrees(1.0, 4.1), S2LatLng.from_degrees(2.0, 4.2), S2LatLng.from_degrees(3.0, 4.2), S2LatLng.from_degrees(4.0, 4.2), S2LatLng.from_degrees(5.0, 4.2)])
+	b = S2Loop.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 1.0), S2LatLng.from_degrees(0.0, 2.0), S2LatLng.from_degrees(0.0, 3.0), S2LatLng.from_degrees(0.1, 2.0), S2LatLng.from_degrees(0.1, 1.0), S2LatLng.from_degrees(0.2, 2.0), S2LatLng.from_degrees(0.2, 3.0), S2LatLng.from_degrees(0.2, 4.0), S2LatLng.from_degrees(1.0, 4.1), S2LatLng.from_degrees(2.0, 4.0), S2LatLng.from_degrees(3.0, 4.0), S2LatLng.from_degrees(4.0, 4.0), S2LatLng.from_degrees(5.0, 4.0)])
+	(a.boundary_approx_equals(b, S1Angle.from_degrees(0.5)), a.boundary_near(b, S1Angle.from_degrees(0.5))) == (Bool.False, Bool.False)
+}
+expect S2Loop.empty().boundary_near(S2Loop.empty(), S1Angle.from_radians(1e-15)) and !S2Loop.empty().boundary_near(S2Loop.full(), S1Angle.from_radians(1e-15))
+expect S2Loop.full().boundary_approx_equals(S2Loop.full(), S1Angle.from_radians(1e-15)) and !S2Loop.full().boundary_approx_equals(S2Loop.empty(), S1Angle.from_radians(1e-15))
+# GetCellUnionBound of the square, from upstream.
+expect S2Loop.from_lat_lngs([S2LatLng.from_degrees(-1.0, -1.0), S2LatLng.from_degrees(-1.0, 1.0), S2LatLng.from_degrees(1.0, 1.0), S2LatLng.from_degrees(1.0, -1.0)]).cell_union_bound() == [1157425104234217472, 1148417904979476480, 1923037040887201792, 382805968326492160].map(S2CellId.from_id)
+
+# The full loop is near only itself.
+expect S2Loop.full().boundary_near(S2Loop.full(), S1Angle.from_radians(1e-15)) and !S2Loop.full().boundary_near(S2Loop.empty(), S1Angle.from_radians(1e-15))

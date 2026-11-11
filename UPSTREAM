@@ -30,7 +30,8 @@ s2geometry
              with equal priority.
 
              The same driver also answers scalar queries (trigonometry of
-             S1Angle, S2Coords, S2CellId, centroids, and so on). The values in
+             S1Angle, S2Coords, S2CellId, centroids, and so on) and
+             questions about loops, polylines, polygons and convex hulls. The values in
              the inline tests of those functions were printed by it, never by
              the port. See the comment at the top of tools/s2_oracle.cc for
              the list of queries.

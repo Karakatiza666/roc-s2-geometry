@@ -231,6 +231,12 @@ S2Cell := { id : S2CellId, face : U64, level : U64, orientation : U64, uv : R2Re
 	may_intersect_cell : S2Cell, S2Cell -> Bool
 	may_intersect_cell = |cell, other| cell.id.intersects(other.id)
 
+	## The cell's own id, upstream's `S2Cell::GetCellUnionBound`. With
+	## `contains_cell` and `may_intersect_cell` this makes a cell a region
+	## that `S2RegionCoverer` can cover.
+	cell_union_bound : S2Cell -> List(S2CellId)
+	cell_union_bound = |cell| [cell.id]
+
 	## The number of leaf cells along one edge of the cell.
 	size_ij : S2Cell -> U64
 	size_ij = |cell| S2CellId.size_ij_at_level(cell.level)
@@ -1442,3 +1448,7 @@ expect {
 }
 expect S2Cell.from_cell_id(S2CellId.from_face(2).child(1).child(3)).size_ij() == 268435456
 expect S2Cell.from_cell_id(S2CellId.from_face(2).child(1).child(3)).size_st() == 0.25
+
+# A cell bounds itself, as upstream's S2Cell::GetCellUnionBound does, so a
+# coverer that may use the cell's level returns the cell.
+expect S2Cell.from_cell_id(S2CellId.from_id(9926595690882924544)).cell_union_bound() == [9926595690882924544].map(S2CellId.from_id)

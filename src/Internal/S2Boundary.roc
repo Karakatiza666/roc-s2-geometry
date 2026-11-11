@@ -1,7 +1,9 @@
 import /R1Interval
 import /S1Angle
+import /S1ChordAngle
 import /S1Interval
 import /S2Cell
+import /S2Coords
 import /S2Edge
 import /S2LatLng
 import /S2LatLngRect
@@ -612,6 +614,61 @@ S2Boundary := [].{
 			$i = $i + 1
 		}
 		Ok({})
+	}
+
+	## The edge of the closed loops `chains` closest to `x`, with its
+	## distance, or `NoEdges` when no chain has two vertices.
+	##
+	## A linear scan in place of upstream's `S2ClosestEdgeQuery` with
+	## interiors excluded. Each edge goes through `S2Edge.update_min_distance`
+	## in chain order, and only a strictly closer edge replaces the best one,
+	## as in the query's brute-force mode.
+	closest_edge : List(List(S2Point)), S2Point -> Try({ distance : S1ChordAngle, v0 : S2Point, v1 : S2Point }, [NoEdges])
+	closest_edge = |chains, x| {
+		var $best = S1ChordAngle.infinity()
+		var $found = Err(NoEdges)
+		for chain in chains {
+			n = if (chain.len() < 2) 0 else chain.len()
+			var $i = 0
+			while $i < n {
+				a = S2Boundary.vertex_at(chain, $i)
+				b = S2Boundary.vertex_at(chain, $i + 1)
+				match S2Edge.update_min_distance(x, a, b, $best) {
+					Ok(d) => {
+						$best = d
+						$found = Ok({ distance: d, v0: a, v1: b })
+					}
+					Err(Unchanged) => {}
+				}
+				$i = $i + 1
+			}
+		}
+		$found
+	}
+
+	## The level of the cells whose centres all the points are, upstream's
+	## `GetSnapLevel` of a polyline or polygon. `NotSnapped` when some point
+	## is not a cell centre, when the points are centres at different levels,
+	## or when there are no points.
+	snap_level : List(S2Point) -> Try(U64, [NotSnapped])
+	snap_level = |points| {
+		var $level = Err(NotSnapped)
+		for p in points {
+			match S2Coords.xyz_to_face_si_ti(p).level {
+				Err(NotCellCenter) => return Err(NotSnapped)
+				Ok(level) =>
+					match $level {
+						Err(NotSnapped) => {
+							$level = Ok(level)
+						}
+						Ok(previous) =>
+							if previous != level {
+								return Err(NotSnapped)
+							}
+					}
+			}
+		}
+		$level
 	}
 
 	## The bounding rectangle of the loop's edges, not just its vertices.

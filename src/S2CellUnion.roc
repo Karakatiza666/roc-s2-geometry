@@ -365,6 +365,11 @@ S2CellUnion := { ids : List(S2CellId) }.{
 		$cap
 	}
 
+	## A few cells that cover the union: those of its bounding cap, as
+	## upstream's `S2CellUnion::GetCellUnionBound` gives them.
+	cell_union_bound : S2CellUnion -> List(S2CellId)
+	cell_union_bound = |u| u.cap_bound().cell_union_bound()
+
 	## The bounding rectangle of the union.
 	rect_bound : S2CellUnion -> S2LatLngRect
 	rect_bound = |u| {
@@ -719,3 +724,6 @@ expect {
 		},
 	)
 }
+
+# Upstream's GetCellUnionBound, through tools/s2_oracle.cc.
+expect S2CellUnion.from_cell_ids([9926595690882924544, 9926595690882924545, 1152921504606846976].map(S2CellId.from_id)).cell_union_bound() == [1152921504606846976, 3458764513820540928, 5764607523034234880, 8070450532247928832, 10376293541461622784, 12682136550675316736].map(S2CellId.from_id)

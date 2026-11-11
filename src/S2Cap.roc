@@ -4,6 +4,8 @@ import S2Cell
 import S2CellId
 import S2Coords
 import S2Edge
+import S2LatLng
+import S2Metric
 import S2Point
 
 ## A disc on the sphere: every point within a given angle of a centre.
@@ -257,6 +259,23 @@ S2Cap := { center : S2Point, radius : S1ChordAngle }.{
 	## The cap itself, so that a cap can be used wherever a region is expected.
 	cap_bound : S2Cap -> S2Cap
 	cap_bound = |cap| cap
+
+	## A few cells that together cover the cap, upstream's
+	## `S2Cap::GetCellUnionBound`.
+	##
+	## The cells are the four at the finest level at which the cap contains at
+	## most one cell vertex, around the vertex nearest the centre. A cap too
+	## large for that gets the six faces. `S2RegionCoverer` starts its search
+	## from this bound.
+	cell_union_bound : S2Cap -> List(S2CellId)
+	cell_union_bound = |cap| {
+		level = S2Metric.min_width.max_level_for(cap.radius_angle().radians())
+		if level == 0 {
+			[0, 1, 2, 3, 4, 5].map(S2CellId.from_face)
+		} else {
+			S2CellId.from_point(cap.center).vertex_neighbors(level - 1)
+		}
+	}
 
 	## True when the cap contains the whole cell.
 	contains_cell : S2Cap, S2Cell -> Bool
@@ -535,3 +554,10 @@ expect {
 expect S2Cap.full().centroid() == S2Point.zero()
 expect S2Cap.from_point(S2Point.new(0.0, 0.0, 1.0)).centroid() == S2Point.zero()
 expect S2Cap.empty().centroid() == S2Point.zero()
+
+# Upstream's GetCellUnionBound, through tools/s2_oracle.cc: a point cap, a
+# 5-degree cap, a 120-degree cap that needs all six faces, and the empty cap.
+expect S2Cap.from_point(S2Point.new(1.0, 0.0, 0.0)).cell_union_bound() == [1152921504606846980, 1152921504606846972, 1921535841011411628, 384307168202282324].map(S2CellId.from_id)
+expect S2Cap.from_center_angle(S2LatLng.from_degrees(10.0, 20.0).to_point(), S1Angle.from_degrees(5.0)).cell_union_bound() == [1224979098644774912, 1657324662872342528, 1369094286720630784, 1513209474796486656].map(S2CellId.from_id)
+expect S2Cap.from_center_angle(S2LatLng.from_degrees(10.0, 20.0).to_point(), S1Angle.from_degrees(120.0)).cell_union_bound() == [1152921504606846976, 3458764513820540928, 5764607523034234880, 8070450532247928832, 10376293541461622784, 12682136550675316736].map(S2CellId.from_id)
+expect S2Cap.empty().cell_union_bound() == [1152921504606846980, 1152921504606846972, 1921535841011411628, 384307168202282324].map(S2CellId.from_id)
