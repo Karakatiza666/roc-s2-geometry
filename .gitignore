@@ -17,3 +17,6 @@ s2polygon_test.cc
 
 # Repo-local temporary files
 .tmp/
+
+# Claude
+.claude/skills
