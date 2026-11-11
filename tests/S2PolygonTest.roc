@@ -55,7 +55,7 @@ S2PolygonTest := [].{
 
 	## The cases that fail any of their claims.
 	failures : () -> U64
-	failures = || PolygonCorpus.cases.fold(0, |acc, case| if S2PolygonTest.failures_of(case) > 0 acc + 1 else acc)
+	failures = || PolygonCorpus.cases.fold(0, |acc, case| if (S2PolygonTest.failures_of(case) > 0) acc + 1 else acc)
 
 	## Pairs upstream states are nested, checked both ways round.
 	nesting_failures : () -> U64
@@ -126,8 +126,8 @@ expect {
 	expected = S2PolygonTest.loop_of_cell(cell).area() - S2PolygonTest.hole_of(cell).area()
 	ring.num_loops() == 2
 		and ring.depth_at(0) == 0
-			and ring.depth_at(1) == 1
-				and (ring.area() - expected).abs() < 1e-12 * expected
+		and ring.depth_at(1) == 1
+		and (ring.area() - expected).abs() < 1e-12 * expected
 }
 
 # The outer loop of the ring is the cell, whose area is measured against
@@ -156,7 +156,7 @@ expect {
 	far_side = S2Cell.from_cell_id(S2CellId.from_point(cell.center().negate()).parent_at_level(6))
 	ring.may_intersect_cell(near_corner)
 		and !ring.may_intersect_cell(far_side)
-			and !ring.contains_cell(far_side)
+		and !ring.contains_cell(far_side)
 }
 
 # A cell well inside the ring is contained by it.
@@ -203,8 +203,8 @@ expect {
 	polygon = S2Polygon.from_loop(outer)
 	polygon.contains_loop(inner)
 		and polygon.intersects_loop(inner)
-			and polygon.is_valid()
-				and polygon.approx_eq(S2Polygon.from_loop(outer), 0.0)
+		and polygon.is_valid()
+		and polygon.approx_eq(S2Polygon.from_loop(outer), 0.0)
 }
 
 # A hole makes the loop that fills it no longer contained.

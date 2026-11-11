@@ -15,7 +15,7 @@ S2Math := [].{
 			return x
 		}
 		truncated = x.to_i64_wrap().to_f64()
-		if truncated > x truncated - 1.0 else truncated
+		if (truncated > x) truncated - 1.0 else truncated
 	}
 
 	## Smallest integral value not less than `x`, as an `F64`.
@@ -25,7 +25,7 @@ S2Math := [].{
 			return x
 		}
 		truncated = x.to_i64_wrap().to_f64()
-		if truncated < x truncated + 1.0 else truncated
+		if (truncated < x) truncated + 1.0 else truncated
 	}
 
 	## Rounds half away from zero, matching C's `lround`.
@@ -34,7 +34,7 @@ S2Math := [].{
 		if !x.is_finite() {
 			return x
 		}
-		if x < 0.0 -S2Math.floor(-x + 0.5) else S2Math.floor(x + 0.5)
+		if (x < 0.0) -S2Math.floor(-x + 0.5) else S2Math.floor(x + 0.5)
 	}
 
 	## Rounds half to even, the tie-break IEEE 754 rounding uses.

@@ -24,5 +24,5 @@ else
 fi
 for f in examples/*.roc; do
 	"$ROC" check "$f" --replace-dep ./src/main.roc "$url"
-	"$ROC" "$f" --replace-dep ./src/main.roc "$url"
+	"$ROC" --replace-dep ./src/main.roc "$url" "$f"
 done

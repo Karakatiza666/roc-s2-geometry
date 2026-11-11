@@ -282,8 +282,8 @@ expect {
 	cell = S2Cell.from_face(0)
 	cell.vertex(0).approx_eq(S2Point.new(1.0, -1.0, -1.0).normalize(), 1e-15)
 		and cell.vertex(1).approx_eq(S2Point.new(1.0, 1.0, -1.0).normalize(), 1e-15)
-			and cell.vertex(2).approx_eq(S2Point.new(1.0, 1.0, 1.0).normalize(), 1e-15)
-				and cell.vertex(3).approx_eq(S2Point.new(1.0, -1.0, 1.0).normalize(), 1e-15)
+		and cell.vertex(2).approx_eq(S2Point.new(1.0, 1.0, 1.0).normalize(), 1e-15)
+		and cell.vertex(3).approx_eq(S2Point.new(1.0, -1.0, 1.0).normalize(), 1e-15)
 }
 expect {
 	# Vertices wind counterclockwise as seen from outside the sphere.
@@ -300,7 +300,7 @@ expect {
 		|acc, k| {
 			n = cell.edge(k)
 			ok = n.dot(cell.vertex(k)).abs() < 1e-15 and n.dot(cell.vertex((k + 1) % 4)).abs() < 1e-15
-			if ok acc else acc + 1
+			if (ok) acc else acc + 1
 		},
 	)
 	failures == 0

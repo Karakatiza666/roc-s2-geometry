@@ -261,7 +261,7 @@ expect {
 	base = S2Edge.crossing_sign(a, b, c, d)
 	base == S2Edge.crossing_sign(b, a, c, d)
 		and base == S2Edge.crossing_sign(a, b, d, c)
-			and base == S2Edge.crossing_sign(c, d, a, b)
+		and base == S2Edge.crossing_sign(c, d, a, b)
 }
 expect {
 	a = S2Point.new(1.0, 0.0, 0.1).normalize()

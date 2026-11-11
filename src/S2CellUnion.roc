@@ -103,8 +103,8 @@ S2CellUnion := { ids : List(S2CellId) }.{
 						wanted = $current.id().bitwise_and(mask)
 						if a.bitwise_and(mask) != wanted
 							or b.bitwise_and(mask) != wanted
-								or c.bitwise_and(mask) != wanted
-									or $current.is_face() {
+							or c.bitwise_and(mask) != wanted
+							or $current.is_face() {
 							$merging = Bool.False
 						} else {
 							$out = $out.drop_last(3)
@@ -426,8 +426,8 @@ expect {
 	u = S2CellUnion.from_cell_ids([cell_id])
 	u.contains_cell_id(cell_id)
 		and u.contains_cell_id(cell_id.child(1))
-			and !u.contains_cell_id(cell_id.parent())
-				and u.intersects_cell_id(cell_id.parent())
+		and !u.contains_cell_id(cell_id.parent())
+		and u.intersects_cell_id(cell_id.parent())
 }
 expect {
 	u = S2CellUnion.whole_sphere()
@@ -439,7 +439,7 @@ expect {
 	b = S2CellUnion.from_cell_ids([S2CellId.from_face(1), S2CellId.from_face(2)])
 	a.union(b).num_cells() == 3
 		and a.intersection(b).cell_ids() == [S2CellId.from_face(1)]
-			and a.difference(b).cell_ids() == [S2CellId.from_face(0)]
+		and a.difference(b).cell_ids() == [S2CellId.from_face(0)]
 }
 expect {
 	# The difference of a cell and one of its children is the other three.
@@ -490,7 +490,7 @@ expect {
 	u = S2CellUnion.from_cell_ids([S2CellId.from_face(0)])
 	(u.average_area() - 2.0943951023931953).abs() < 1e-15
 		and u.approx_area() > 0.0
-			and (u.exact_area() - 4.0 * F64.pi / 6.0).abs() < 1e-13
+		and (u.exact_area() - 4.0 * F64.pi / 6.0).abs() < 1e-13
 }
 expect {
 	u = S2CellUnion.from_cell_ids([S2CellId.from_face(0).child_begin_at_level(6)])

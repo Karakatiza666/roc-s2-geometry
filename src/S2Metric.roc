@@ -150,7 +150,7 @@ expect {
 		|acc, level| {
 			value = S2Metric.max_diag.value_at(level)
 			found = S2Metric.max_diag.min_level_for(value)
-			if found == level acc else acc + 1
+			if (found == level) acc else acc + 1
 		},
 	)
 	failures == 0
@@ -163,7 +163,7 @@ expect {
 		|acc, level| {
 			value = S2Metric.min_width.value_at(level)
 			found = S2Metric.min_width.max_level_for(value)
-			if found == level acc else acc + 1
+			if (found == level) acc else acc + 1
 		},
 	)
 	failures == 0

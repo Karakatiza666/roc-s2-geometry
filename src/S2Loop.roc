@@ -885,8 +885,8 @@ expect {
 	])
 	loop.is_valid()
 		and loop.contains_point(S2LatLng.from_degrees(0.0, 0.0).to_point())
-			and !loop.contains_point(S2LatLng.from_degrees(0.0, 20.0).to_point())
-				and !loop.contains_point(S2LatLng.from_degrees(20.0, 0.0).to_point())
+		and !loop.contains_point(S2LatLng.from_degrees(0.0, 20.0).to_point())
+		and !loop.contains_point(S2LatLng.from_degrees(20.0, 0.0).to_point())
 }
 expect {
 	# Its bound covers the loop, including the poleward bulge of the top edge.
@@ -975,7 +975,7 @@ expect {
 	])
 	loop.contains_point(S2Point.new(0.0, 0.0, 1.0))
 		and loop.rect_bound().lat_hi().degrees() == 90.0
-			and loop.rect_bound().lng().is_full()
+		and loop.rect_bound().lng().is_full()
 }
 expect {
 	loop = S2Loop.from_lat_lngs([
@@ -1033,11 +1033,11 @@ expect {
 	])
 	outer.contains(inner)
 		and outer.contains_nested(inner)
-			and !inner.contains(outer)
-				and outer.intersects(inner)
-					and inner.intersects(outer)
-						and outer.compare_boundary(inner, Bool.False) == 1
-							and inner.compare_boundary(outer, Bool.False) == -1
+		and !inner.contains(outer)
+		and outer.intersects(inner)
+		and inner.intersects(outer)
+		and outer.compare_boundary(inner, Bool.False) == 1
+		and inner.compare_boundary(outer, Bool.False) == -1
 }
 expect {
 	# Two squares that overlap in one corner.
@@ -1071,8 +1071,8 @@ expect {
 	])
 	!a.contains(b)
 		and !a.intersects(b)
-			and a.compare_boundary(b, Bool.False) == -1
-				and !a.boundary_equals(b)
+		and a.compare_boundary(b, Bool.False) == -1
+		and !a.boundary_equals(b)
 }
 expect {
 	# A loop contains itself, and neither contains its own complement.
@@ -1083,9 +1083,9 @@ expect {
 	])
 	loop.contains(loop)
 		and loop.boundary_equals(loop)
-			and !loop.contains(loop.invert())
-				and !loop.invert().contains(loop)
-					and !loop.intersects(loop.invert())
+		and !loop.contains(loop.invert())
+		and !loop.invert().contains(loop)
+		and !loop.intersects(loop.invert())
 }
 expect {
 	# Where a loop starts makes no difference to its boundary.

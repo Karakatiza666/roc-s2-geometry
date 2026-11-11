@@ -30,7 +30,7 @@ S2RegionTest := [].{
 	cell_of = |case| S2Cell.from_cell_id(S2CellId.from_id(case.cell_id))
 
 	failures : (RegionCorpus.Case -> Bool) -> U64
-	failures = |check| RegionCorpus.cases.fold(0, |acc, case| if check(case) acc else acc + 1)
+	failures = |check| RegionCorpus.cases.fold(0, |acc, case| if (check(case)) acc else acc + 1)
 
 	close : F64, F64, F64, F64 -> Bool
 	close = |actual, expected, absolute, relative|

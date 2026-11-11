@@ -147,7 +147,7 @@ S2LoopRelationTest := [].{
 
 	## The cases that fail any of their claims.
 	failures : () -> U64
-	failures = || LoopRelationCorpus.cases.fold(0, |acc, case| if S2LoopRelationTest.failures_of(case) > 0 acc + 1 else acc)
+	failures = || LoopRelationCorpus.cases.fold(0, |acc, case| if (S2LoopRelationTest.failures_of(case) > 0) acc + 1 else acc)
 }
 
 expect LoopRelationCorpus.cases.len() == 86

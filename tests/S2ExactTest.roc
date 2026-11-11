@@ -15,7 +15,7 @@ import ExactCorpus
 S2ExactTest := [].{
 
 	failures : (ExactCorpus.Case -> Bool) -> U64
-	failures = |check| ExactCorpus.cases.fold(0, |acc, case| if check(case) acc else acc + 1)
+	failures = |check| ExactCorpus.cases.fold(0, |acc, case| if (check(case)) acc else acc + 1)
 
 	point : (F64, F64, F64) -> S2Point
 	point = |(x, y, z)| S2Point.new(x, y, z)

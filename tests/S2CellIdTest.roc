@@ -15,7 +15,7 @@ S2CellIdTest := [].{
 
 	## Counts the cases a check rejects.
 	failures : (CellIdCorpus.Case -> Bool) -> U64
-	failures = |check| CellIdCorpus.cases.fold(0, |acc, case| if check(case) acc else acc + 1)
+	failures = |check| CellIdCorpus.cases.fold(0, |acc, case| if (check(case)) acc else acc + 1)
 }
 
 # The identity of the leaf cell containing a point.
@@ -124,8 +124,8 @@ expect S2CellIdTest.failures(
 		children = parent.children()
 		children.len() == 4
 			and children.all(|child| parent.contains(child) and child.level() == 11)
-				and children.get(0) == Ok(parent.child_begin())
-					and parent.child_end() == parent.child(3).next()
+			and children.get(0) == Ok(parent.child_begin())
+			and parent.child_end() == parent.child(3).next()
 	},
 )
 	== 0

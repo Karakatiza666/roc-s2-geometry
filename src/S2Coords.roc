@@ -54,7 +54,7 @@ S2Coords := [].{
 	st_to_ij : F64 -> U64
 	st_to_ij = |s| {
 		scaled = (S2Coords.max_size.to_f64() * s).to_i64_wrap()
-		floored = if scaled.to_f64() > S2Coords.max_size.to_f64() * s scaled - 1 else scaled
+		floored = if (scaled.to_f64() > S2Coords.max_size.to_f64() * s) scaled - 1 else scaled
 		floored.max(0).min((S2Coords.max_size - 1).to_i64_wrap()).to_u64_wrap()
 	}
 
@@ -254,7 +254,7 @@ expect {
 			p = S2Coords.face_uv_to_xyz(face, 0.3, -0.7).normalize()
 			(got_face, uv) = S2Coords.xyz_to_face_uv(p)
 			ok = got_face == face and (uv.x() - 0.3).abs() < 1e-15 and (uv.y() + 0.7).abs() < 1e-15
-			if ok acc else acc + 1
+			if (ok) acc else acc + 1
 		},
 	)
 	failures == 0
@@ -271,7 +271,7 @@ expect {
 			u = S2Coords.u_axis(face)
 			v = S2Coords.v_axis(face)
 			ok = u.dot(v) == 0.0 and u.dot(n) == 0.0 and v.dot(n) == 0.0 and u.cross(v) == n
-			if ok acc else acc + 1
+			if (ok) acc else acc + 1
 		},
 	)
 	failures == 0

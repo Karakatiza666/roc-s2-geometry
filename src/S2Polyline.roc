@@ -352,8 +352,8 @@ expect {
 	line = S2Polyline.from_lat_lngs([S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(0.0, 90.0)])
 	line.interpolate(0.0) == (line.vertex(0) ?? S2Point.zero())
 		and line.interpolate(1.0) == (line.vertex(1) ?? S2Point.zero())
-			and line.interpolate(-5.0) == (line.vertex(0) ?? S2Point.zero())
-				and line.interpolate(5.0) == (line.vertex(1) ?? S2Point.zero())
+		and line.interpolate(-5.0) == (line.vertex(0) ?? S2Point.zero())
+		and line.interpolate(5.0) == (line.vertex(1) ?? S2Point.zero())
 }
 expect {
 	# Interpolation on a three-vertex polyline crosses into the second edge.
@@ -399,7 +399,7 @@ expect {
 	cap = line.cap_bound()
 	rect.contains_point(line.vertex(0) ?? S2Point.zero())
 		and rect.contains_point(line.vertex(1) ?? S2Point.zero())
-			and cap.contains_point(line.vertex(1) ?? S2Point.zero())
+		and cap.contains_point(line.vertex(1) ?? S2Point.zero())
 }
 expect S2Polyline.empty().rect_bound().is_empty()
 expect S2Polyline.empty().cap_bound().is_empty()

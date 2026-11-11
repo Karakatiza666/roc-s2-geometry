@@ -110,11 +110,11 @@ S1Angle := { radians : F64 }.{
 
 	## The smaller of two angles.
 	min : S1Angle, S1Angle -> S1Angle
-	min = |a, b| if a.radians <= b.radians a else b
+	min = |a, b| if (a.radians <= b.radians) a else b
 
 	## The larger of two angles.
 	max : S1Angle, S1Angle -> S1Angle
-	max = |a, b| if a.radians >= b.radians a else b
+	max = |a, b| if (a.radians >= b.radians) a else b
 
 	## True when the two angles differ by at most `max_error` radians.
 	approx_eq : S1Angle, S1Angle, F64 -> Bool

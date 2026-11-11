@@ -302,9 +302,9 @@ expect {
 	s = S2Predicates.sign(a, b, c)
 	s == S2Predicates.sign(b, c, a)
 		and s == S2Predicates.sign(c, a, b)
-			and s == -S2Predicates.sign(b, a, c)
-				and s == -S2Predicates.sign(c, b, a)
-					and s == -S2Predicates.sign(a, c, b)
+		and s == -S2Predicates.sign(b, a, c)
+		and s == -S2Predicates.sign(c, b, a)
+		and s == -S2Predicates.sign(a, c, b)
 }
 expect {
 	# Nearly collinear points that triage cannot decide.
@@ -335,8 +335,8 @@ expect {
 	)
 	sorted.0 == S2Point.new(1.0, 0.0, 0.0)
 		and sorted.1 == S2Point.new(2.0, 0.0, 0.0)
-			and sorted.2 == S2Point.new(3.0, 0.0, 0.0)
-				and s == 1
+		and sorted.2 == S2Point.new(3.0, 0.0, 0.0)
+		and s == 1
 }
 expect {
 	(sorted, s) = S2Predicates.sort3(

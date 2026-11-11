@@ -15,7 +15,7 @@ S2CellTest := [].{
 	cell_of = |case| S2Cell.from_cell_id(S2CellId.from_id(case.id))
 
 	failures : (CellCorpus.Case -> Bool) -> U64
-	failures = |check| CellCorpus.cases.fold(0, |acc, case| if check(case) acc else acc + 1)
+	failures = |check| CellCorpus.cases.fold(0, |acc, case| if (check(case)) acc else acc + 1)
 
 	## True when the two values agree to within an absolute and a relative
 	## tolerance.
@@ -90,7 +90,7 @@ expect S2CellTest.failures(
 		cell = S2CellTest.cell_of(case)
 		cell.contains_point(cell.center())
 			and S2LatLngRect.from_cell(cell).contains_point(cell.center())
-				and S2Cap.from_cell(cell).contains_point(cell.center())
+			and S2Cap.from_cell(cell).contains_point(cell.center())
 	},
 )
 	== 0

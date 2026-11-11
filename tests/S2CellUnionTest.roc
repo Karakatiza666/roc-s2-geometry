@@ -9,7 +9,7 @@ S2CellUnionTest := [].{
 	union_of = |ids| S2CellUnion.from_ids(ids)
 
 	failures : (CellUnionCorpus.Case -> Bool) -> U64
-	failures = |check| CellUnionCorpus.cases.fold(0, |acc, case| if check(case) acc else acc + 1)
+	failures = |check| CellUnionCorpus.cases.fold(0, |acc, case| if (check(case)) acc else acc + 1)
 }
 
 # Normalization: sorting, absorbing contained cells, and folding four siblings

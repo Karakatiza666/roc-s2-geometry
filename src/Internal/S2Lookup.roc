@@ -2115,7 +2115,7 @@ expect {
 			orientation = index.bitwise_and(3)
 			entry = S2Lookup.pos_entry(index)
 			back = S2Lookup.ij_entry(entry.shr_zf_wrap(2).shl_wrap(2).bitwise_or(orientation))
-			if back.shr_zf_wrap(2) == index.shr_zf_wrap(2) acc else acc + 1
+			if (back.shr_zf_wrap(2) == index.shr_zf_wrap(2)) acc else acc + 1
 		},
 	)
 	mismatches == 0

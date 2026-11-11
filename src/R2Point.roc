@@ -16,7 +16,7 @@ R2Point := { x : F64, y : F64 }.{
 
 	## Coordinate `0` is `x` and coordinate `1` is `y`.
 	coord : R2Point, U64 -> F64
-	coord = |p, k| if k == 0 p.x else p.y
+	coord = |p, k| if (k == 0) p.x else p.y
 
 	plus : R2Point, R2Point -> R2Point
 	plus = |a, b| { x: a.x + b.x, y: a.y + b.y }

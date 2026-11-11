@@ -282,9 +282,9 @@ S2Cap := { center : S2Point, radius : S1ChordAngle }.{
 		(cap.center.angle_to(other.center).radians() <= max_error
 			and (r1 - r2).abs() <= max_error)
 			or (cap.is_empty() and r2 <= max_error)
-				or (other.is_empty() and r1 <= max_error)
-					or (cap.is_full() and r2 >= 4.0 - max_error)
-						or (other.is_full() and r1 >= 4.0 - max_error)
+			or (other.is_empty() and r1 <= max_error)
+			or (cap.is_full() and r2 >= 4.0 - max_error)
+			or (other.is_full() and r1 >= 4.0 - max_error)
 	}
 
 	is_eq : S2Cap, S2Cap -> Bool
@@ -331,7 +331,7 @@ expect {
 	cap = S2Cap.from_center_angle(S2Point.new(1.0, 0.0, 0.0), S1Angle.from_degrees(20.0))
 	cap.contains_point(S2Point.new(1.0, 0.0, 0.0))
 		and cap.interior_contains_point(S2Point.new(1.0, 0.0, 0.0))
-			and !cap.contains_point(S2Point.new(0.0, 1.0, 0.0))
+		and !cap.contains_point(S2Point.new(0.0, 1.0, 0.0))
 }
 expect {
 	# A zero-radius cap contains its centre but has no interior.
@@ -380,7 +380,7 @@ expect {
 	cell = S2Cell.from_face(0)
 	cap = S2Cap.from_cell(cell)
 	failures : U64
-	failures = (0.U64).until(4).fold(0, |acc, k| if cap.contains_point(cell.vertex(k)) acc else acc + 1)
+	failures = (0.U64).until(4).fold(0, |acc, k| if (cap.contains_point(cell.vertex(k))) acc else acc + 1)
 	failures == 0 and cap.contains_point(cell.center())
 }
 expect {

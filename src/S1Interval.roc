@@ -14,8 +14,8 @@ S1Interval := { lo : F64, hi : F64 }.{
 	## is already `pi`, which keeps the full and empty intervals distinct.
 	new : F64, F64 -> S1Interval
 	new = |lo, hi| {
-		clamped_lo = if lo == -F64.pi and hi != F64.pi F64.pi else lo
-		clamped_hi = if hi == -F64.pi and lo != F64.pi F64.pi else hi
+		clamped_lo = if (lo == -F64.pi and hi != F64.pi) F64.pi else lo
+		clamped_hi = if (hi == -F64.pi and lo != F64.pi) F64.pi else hi
 		{ lo: clamped_lo, hi: clamped_hi }
 	}
 
@@ -36,7 +36,7 @@ S1Interval := { lo : F64, hi : F64 }.{
 	## The interval containing exactly one point.
 	from_point : F64 -> S1Interval
 	from_point = |p| {
-		q = if p == -F64.pi F64.pi else p
+		q = if (p == -F64.pi) F64.pi else p
 		{ lo: q, hi: q }
 	}
 
@@ -45,8 +45,8 @@ S1Interval := { lo : F64, hi : F64 }.{
 	## Ties go to the interval running counterclockwise from `a` to `b`.
 	from_point_pair : F64, F64 -> S1Interval
 	from_point_pair = |a, b| {
-		na = if a == -F64.pi F64.pi else a
-		nb = if b == -F64.pi F64.pi else b
+		na = if (a == -F64.pi) F64.pi else a
+		nb = if (b == -F64.pi) F64.pi else b
 		if S1Interval.positive_distance(na, nb) <= F64.pi {
 			{ lo: na, hi: nb }
 		} else {
@@ -73,7 +73,7 @@ S1Interval := { lo : F64, hi : F64 }.{
 
 	## Bound `0` is `lo` and bound `1` is `hi`.
 	bound : S1Interval, U64 -> F64
-	bound = |i, k| if k == 0 i.lo else i.hi
+	bound = |i, k| if (k == 0) i.lo else i.hi
 
 	## True when the interval wraps through the +/-pi boundary.
 	is_inverted : S1Interval -> Bool
@@ -91,8 +91,8 @@ S1Interval := { lo : F64, hi : F64 }.{
 	is_valid = |i|
 		i.lo.abs() <= F64.pi
 			and i.hi.abs() <= F64.pi
-				and !(i.lo == -F64.pi and i.hi != F64.pi)
-					and !(i.hi == -F64.pi and i.lo != F64.pi)
+			and !(i.lo == -F64.pi and i.hi != F64.pi)
+			and !(i.hi == -F64.pi and i.lo != F64.pi)
 
 	## The midpoint of the interval, in `[-pi, pi]`.
 	center : S1Interval -> F64
@@ -135,13 +135,13 @@ S1Interval := { lo : F64, hi : F64 }.{
 
 	contains_point : S1Interval, F64 -> Bool
 	contains_point = |i, p| {
-		q = if p == -F64.pi F64.pi else p
+		q = if (p == -F64.pi) F64.pi else p
 		i.fast_contains_point(q)
 	}
 
 	interior_contains_point : S1Interval, F64 -> Bool
 	interior_contains_point = |i, p| {
-		q = if p == -F64.pi F64.pi else p
+		q = if (p == -F64.pi) F64.pi else p
 		if i.is_inverted() {
 			q > i.lo or q < i.hi
 		} else {
@@ -286,7 +286,7 @@ S1Interval := { lo : F64, hi : F64 }.{
 	## The smallest interval containing this one and the point.
 	add_point : S1Interval, F64 -> S1Interval
 	add_point = |i, p| {
-		q = if p == -F64.pi F64.pi else p
+		q = if (p == -F64.pi) F64.pi else p
 		if i.fast_contains_point(q) {
 			return i
 		}
@@ -305,7 +305,7 @@ S1Interval := { lo : F64, hi : F64 }.{
 	## The point of the interval closest to `p`.
 	project : S1Interval, F64 -> F64
 	project = |i, p| {
-		q = if p == -F64.pi F64.pi else p
+		q = if (p == -F64.pi) F64.pi else p
 		if i.fast_contains_point(q) {
 			return q
 		}
@@ -339,7 +339,7 @@ S1Interval := { lo : F64, hi : F64 }.{
 		}
 		new_lo = S2Math.remainder(i.lo - radius, 2.0 * F64.pi)
 		new_hi = S2Math.remainder(i.hi + radius, 2.0 * F64.pi)
-		adjusted_lo = if new_lo <= -F64.pi F64.pi else new_lo
+		adjusted_lo = if (new_lo <= -F64.pi) F64.pi else new_lo
 		S1Interval.new(adjusted_lo, new_hi)
 	}
 

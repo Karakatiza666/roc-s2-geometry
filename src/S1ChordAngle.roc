@@ -203,10 +203,10 @@ S1ChordAngle := { length2 : F64 }.{
 	is_gte = |a, b| a.length2 >= b.length2
 
 	min : S1ChordAngle, S1ChordAngle -> S1ChordAngle
-	min = |a, b| if a.length2 <= b.length2 a else b
+	min = |a, b| if (a.length2 <= b.length2) a else b
 
 	max : S1ChordAngle, S1ChordAngle -> S1ChordAngle
-	max = |a, b| if a.length2 >= b.length2 a else b
+	max = |a, b| if (a.length2 >= b.length2) a else b
 
 	to_inspect : S1ChordAngle -> Str
 	to_inspect = |c| "S1ChordAngle(${c.degrees().to_str()} deg)"

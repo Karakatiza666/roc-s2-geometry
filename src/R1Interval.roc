@@ -18,7 +18,7 @@ R1Interval := { lo : F64, hi : F64 }.{
 
 	## The smallest interval containing both points, in either order.
 	from_point_pair : F64, F64 -> R1Interval
-	from_point_pair = |a, b| if a <= b { lo: a, hi: b } else { lo: b, hi: a }
+	from_point_pair = |a, b| if (a <= b) { lo: a, hi: b } else { lo: b, hi: a }
 
 	lo : R1Interval -> F64
 	lo = |i| i.lo
@@ -28,7 +28,7 @@ R1Interval := { lo : F64, hi : F64 }.{
 
 	## Bound `0` is `lo` and bound `1` is `hi`.
 	bound : R1Interval, U64 -> F64
-	bound = |i, k| if k == 0 i.lo else i.hi
+	bound = |i, k| if (k == 0) i.lo else i.hi
 
 	is_empty : R1Interval -> Bool
 	is_empty = |i| i.lo > i.hi

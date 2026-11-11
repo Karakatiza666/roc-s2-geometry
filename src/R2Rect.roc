@@ -48,7 +48,7 @@ R2Rect := { x : R1Interval, y : R1Interval }.{
 
 	## Interval `0` is the x interval and interval `1` is the y interval.
 	interval : R2Rect, U64 -> R1Interval
-	interval = |r, k| if k == 0 r.x else r.y
+	interval = |r, k| if (k == 0) r.x else r.y
 
 	## The lower-left corner.
 	lo : R2Rect -> R2Point

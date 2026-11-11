@@ -234,8 +234,8 @@ S2LatLngRect := { lat : R1Interval, lng : S1Interval }.{
 	is_valid = |r|
 		r.lat.lo().abs() <= 0.5 * F64.pi
 			and r.lat.hi().abs() <= 0.5 * F64.pi
-				and r.lng.is_valid()
-					and r.lat.is_empty() == r.lng.is_empty()
+			and r.lng.is_valid()
+			and r.lat.is_empty() == r.lng.is_empty()
 
 	is_empty : S2LatLngRect -> Bool
 	is_empty = |r| r.lat.is_empty()
@@ -557,28 +557,28 @@ expect {
 	r = S2LatLngRect.from_bounds(S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(10.0, 20.0))
 	r.vertex(0) == S2LatLng.from_degrees(0.0, 0.0)
 		and r.vertex(1) == S2LatLng.from_degrees(0.0, 20.0)
-			and r.vertex(2) == S2LatLng.from_degrees(10.0, 20.0)
-				and r.vertex(3) == S2LatLng.from_degrees(10.0, 0.0)
+		and r.vertex(2) == S2LatLng.from_degrees(10.0, 20.0)
+		and r.vertex(3) == S2LatLng.from_degrees(10.0, 0.0)
 }
 expect {
 	r = S2LatLngRect.from_bounds(S2LatLng.from_degrees(-10.0, -20.0), S2LatLng.from_degrees(10.0, 20.0))
 	r.contains_lat_lng(S2LatLng.from_degrees(0.0, 0.0))
 		and !r.contains_lat_lng(S2LatLng.from_degrees(0.0, 30.0))
-			and r.contains_point(S2LatLng.from_degrees(5.0, 5.0).to_point())
+		and r.contains_point(S2LatLng.from_degrees(5.0, 5.0).to_point())
 }
 expect {
 	# A rectangle spanning the antimeridian.
 	r = S2LatLngRect.from_bounds(S2LatLng.from_degrees(-10.0, 170.0), S2LatLng.from_degrees(10.0, -170.0))
 	r.contains_lat_lng(S2LatLng.from_degrees(0.0, 180.0))
 		and r.contains_lat_lng(S2LatLng.from_degrees(0.0, -175.0))
-			and !r.contains_lat_lng(S2LatLng.from_degrees(0.0, 0.0))
+		and !r.contains_lat_lng(S2LatLng.from_degrees(0.0, 0.0))
 }
 expect {
 	a = S2LatLngRect.from_bounds(S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(10.0, 10.0))
 	b = S2LatLngRect.from_bounds(S2LatLng.from_degrees(5.0, 5.0), S2LatLng.from_degrees(15.0, 15.0))
 	a.intersects_rect(b)
 		and a.union(b) == S2LatLngRect.from_bounds(S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(15.0, 15.0))
-			and a.intersection(b) == S2LatLngRect.from_bounds(S2LatLng.from_degrees(5.0, 5.0), S2LatLng.from_degrees(10.0, 10.0))
+		and a.intersection(b) == S2LatLngRect.from_bounds(S2LatLng.from_degrees(5.0, 5.0), S2LatLng.from_degrees(10.0, 10.0))
 }
 expect {
 	a = S2LatLngRect.from_bounds(S2LatLng.from_degrees(0.0, 0.0), S2LatLng.from_degrees(10.0, 10.0))
@@ -616,7 +616,7 @@ expect {
 		|acc, f| {
 			cell = S2Cell.from_face(f)
 			rect = S2LatLngRect.from_cell(cell)
-			if rect.contains_point(cell.center()) acc else acc + 1
+			if (rect.contains_point(cell.center())) acc else acc + 1
 		},
 	)
 	failures == 0
@@ -628,7 +628,7 @@ expect {
 	failures : U64
 	failures = (0.U64).until(4).fold(
 		0,
-		|acc, k| if rect.contains_point(cell.vertex(k)) acc else acc + 1,
+		|acc, k| if (rect.contains_point(cell.vertex(k))) acc else acc + 1,
 	)
 	failures == 0
 }
@@ -649,7 +649,7 @@ expect {
 	failures : U64
 	failures = (0.U64).until(4).fold(
 		0,
-		|acc, k| if cap.contains_point(r.vertex(k).to_point()) acc else acc + 1,
+		|acc, k| if (cap.contains_point(r.vertex(k).to_point())) acc else acc + 1,
 	)
 	failures == 0
 }

@@ -26,7 +26,7 @@ S2RegionCovererTest := [].{
 			.with_level_mod(case.level_mod)
 
 	failures : (CoverCorpus.Case -> Bool) -> U64
-	failures = |check| CoverCorpus.cases.fold(0, |acc, case| if check(case) acc else acc + 1)
+	failures = |check| CoverCorpus.cases.fold(0, |acc, case| if (check(case)) acc else acc + 1)
 }
 
 expect S2RegionCovererTest.failures(
@@ -77,7 +77,7 @@ expect S2RegionCovererTest.failures(
 					level = cell_id.level()
 					level >= case.min_level
 						and level <= case.max_level
-							and (level - case.min_level) % case.level_mod == 0
+						and (level - case.min_level) % case.level_mod == 0
 				},
 			),
 )

@@ -173,7 +173,7 @@ S2RegionCoverer := { min_level : U64, max_level : U64, level_mod : U64, max_cell
 			}
 			if candidate.cell.level() < coverer.min_level
 				or candidate.children.len() == 1
-					or rest.result.len() + pending + candidate.children.len() <= coverer.max_cells {
+				or rest.result.len() + pending + candidate.children.len() <= coverer.max_cells {
 				var $next = rest
 				for child in candidate.children {
 					$next = coverer.add_candidate($next, probe, interior, Ok(child))
@@ -289,7 +289,7 @@ S2RegionCoverer := { min_level : U64, max_level : U64, level_mod : U64, max_cell
 			search
 		} else if !interior
 			and num_terminals == (1.U64).shl_wrap((2 * coverer.level_mod).to_u8_wrap())
-				and candidate.cell.level() >= coverer.min_level {
+			and candidate.cell.level() >= coverer.min_level {
 			# Every descendant is terminal, so the cell itself will do.
 			coverer.add_candidate(
 				search,
@@ -396,7 +396,7 @@ expect {
 	failures : U64
 	failures = cells.fold(
 		0,
-		|acc, cell_id| if cap.may_intersect_cell(S2Cell.from_cell_id(cell_id)) acc else acc + 1,
+		|acc, cell_id| if (cap.may_intersect_cell(S2Cell.from_cell_id(cell_id))) acc else acc + 1,
 	)
 	failures == 0 and cells.len() > 0
 }
@@ -419,7 +419,7 @@ expect {
 	failures : U64
 	failures = cells.fold(
 		0,
-		|acc, cell_id| if cap.contains_cell(S2Cell.from_cell_id(cell_id)) acc else acc + 1,
+		|acc, cell_id| if (cap.contains_cell(S2Cell.from_cell_id(cell_id))) acc else acc + 1,
 	)
 	failures == 0
 }
@@ -452,7 +452,7 @@ expect {
 	)
 	cells = S2RegionCoverer.default().with_max_cells(8).with_min_level(4).covering(cap)
 	failures : U64
-	failures = cells.fold(0, |acc, cell_id| if cell_id.level() >= 4 acc else acc + 1)
+	failures = cells.fold(0, |acc, cell_id| if (cell_id.level() >= 4) acc else acc + 1)
 	failures == 0
 }
 expect {
@@ -463,7 +463,7 @@ expect {
 	)
 	cells = S2RegionCoverer.default().with_max_cells(8).with_max_level(10).covering(cap)
 	failures : U64
-	failures = cells.fold(0, |acc, cell_id| if cell_id.level() <= 10 acc else acc + 1)
+	failures = cells.fold(0, |acc, cell_id| if (cell_id.level() <= 10) acc else acc + 1)
 	failures == 0
 }
 expect {
@@ -478,7 +478,7 @@ expect {
 		.with_level_mod(3)
 		.covering(cap)
 	failures : U64
-	failures = cells.fold(0, |acc, cell_id| if (cell_id.level() - 2) % 3 == 0 acc else acc + 1)
+	failures = cells.fold(0, |acc, cell_id| if ((cell_id.level() - 2) % 3 == 0) acc else acc + 1)
 	failures == 0 and cells.len() > 0
 }
 expect {

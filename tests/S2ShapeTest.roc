@@ -29,7 +29,7 @@ S2ShapeTest := [].{
 	coarse_cases = CellCorpus.cases.keep_if(|case| case.level <= 12)
 
 	failures : (CellCorpus.Case -> Bool) -> U64
-	failures = |check| S2ShapeTest.coarse_cases.fold(0, |acc, case| if check(case) acc else acc + 1)
+	failures = |check| S2ShapeTest.coarse_cases.fold(0, |acc, case| if (check(case)) acc else acc + 1)
 
 	close : F64, F64, F64, F64 -> Bool
 	close = |actual, expected, absolute, relative|
@@ -176,5 +176,5 @@ expect {
 	covering = coverer.cell_union_covering(line)
 	covering.contains_point(cell.vertex(0))
 		and covering.contains_point(cell.vertex(2))
-			and coverer.interior_covering(line).is_empty()
+		and coverer.interior_covering(line).is_empty()
 }
